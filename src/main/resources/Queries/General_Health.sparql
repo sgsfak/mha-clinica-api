@@ -1,0 +1,73 @@
+PREFIX : <http://www.semanticweb.org/kondylak/ontologies/2013/1/untitled-ontology-86#>
+PREFIX obo: <http://purl.obolibrary.org/obo/>
+PREFIX ro: <http://www.obofoundry.org/ro/ro.owl#>
+PREFIX transmed: <http://www.w3.org/2001/sw/hcls/ns/transmed/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX acgt:<http://www.ifomis.org/acgt/1.0#>
+PREFIX snomedct:<http://purl.bioontology.org/ontology/SNOMEDCT/>
+
+SELECT DISTINCT ?user_name  ?date ?alcohol_value ?diabetes_value  ?smoking_value ?parental_hypertension_value
+WHERE {
+
+#patient has name
+	?patient foaf:accountName ?user_name.
+
+#patient has encounter
+	?patient ro:participates_in ?encounter.
+
+#encounter has date
+	?encounter transmed:has_date ?date.
+
+OPTIONAL
+{
+#encounter reveals phenotype
+	?encounter acgt:reveals ?alcohol.
+
+#phenotype has type
+	?alcohol a  snomedct:160573003. 
+
+#phenotype has value
+	?alcohol transmed:TMO_0185 ?alcohol_value. 
+}
+
+OPTIONAL
+{
+#encounter reveals phenotype
+	?encounter acgt:reveals ?smoking.
+
+#phenotype has type
+	?smoking a  snomedct:365982000. 
+
+#phenotype has value
+	?smoking transmed:TMO_0185 ?smoking_value. 
+}
+
+OPTIONAL
+{
+#encounter reveals phenotype
+	?encounter acgt:reveals ?diabetes.
+
+#phenotype has type
+	?diabetes a  snomedct:73211009. 
+
+#phenotype has value
+	?diabetes transmed:TMO_0185 ?diabetes_value. 
+}
+
+
+OPTIONAL
+{
+#encounter reveals phenotype
+	?encounter acgt:reveals ?parental_hypertension.
+
+#phenotype has type
+	?parental_hypertension a  snomedct:160357008. 
+
+#phenotype has value
+	?parental_hypertension transmed:TMO_0185 ?parental_hypertension_value. 
+}
+
+FILTER  ( ?user_name = '{USER}').
+}

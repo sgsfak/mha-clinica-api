@@ -1,0 +1,96 @@
+PREFIX : <http://www.semanticweb.org/kondylak/ontologies/2013/1/untitled-ontology-86#>
+PREFIX obo: <http://purl.obolibrary.org/obo/>
+PREFIX ro: <http://www.obofoundry.org/ro/ro.owl#>
+PREFIX transmed: <http://www.w3.org/2001/sw/hcls/ns/transmed/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX acgt:<http://www.ifomis.org/acgt/1.0#>
+PREFIX snomedct:<http://purl.bioontology.org/ontology/SNOMEDCT/>
+
+SELECT DISTINCT ?user_name  ?date ?heightvalue ?weightvalue ?bmivalue ?blood_pressure_systolic_value ?pulse_value ?left_vent_hypertrophy_value
+WHERE {
+
+#patient has name
+	?patient foaf:accountName ?user_name.
+
+#patient has encounter
+	?patient ro:participates_in ?encounter.
+
+#encounter has date
+	?encounter transmed:has_date ?date.
+
+OPTIONAL
+{
+#encounter reveals phenotype
+	?encounter acgt:reveals ?height.
+
+#phenotype has type
+	?height a  transmed:TMO_0181. 
+
+#phenotype has value
+	?height transmed:TMO_0185 ?heightvalue. 
+}
+
+OPTIONAL
+{
+#encounter reveals phenotype
+	?encounter acgt:reveals ?weight.
+
+#phenotype has type
+	?weight a  transmed:TMO_0180. 
+
+#phenotype has value
+	?weight transmed:TMO_0185 ?weightvalue. 
+}
+
+OPTIONAL
+{
+#encounter reveals phenotype
+	?encounter acgt:reveals ?bmi.
+
+#phenotype has type
+	?bmi a  snomedct:60621009. 
+
+#phenotype has value
+	?bmi transmed:TMO_0185 ?bmivalue. 
+}
+
+OPTIONAL
+{
+#encounter reveals phenotype
+	?encounter acgt:reveals ?blood_pressure_systolic.
+
+#phenotype has type
+	?blood_pressure_systolic a  snomedct:271649006. 
+
+#phenotype has value
+	?blood_pressure_systolic transmed:TMO_0185 ?blood_pressure_systolic_value. 
+}
+
+OPTIONAL
+{
+#encounter reveals phenotype
+	?encounter acgt:reveals ?pulse.
+
+#phenotype has type
+	?pulse a  snomedct:78564009. 
+
+#phenotype has value
+	?pulse transmed:TMO_0185 ?pulse_value. 
+}
+
+OPTIONAL
+{
+#encounter reveals phenotype
+	?encounter acgt:reveals ?left_vent_hypertrophy.
+
+#phenotype has type
+	?left_vent_hypertrophy a  snomedct:102737005. 
+
+#phenotype has value
+	?left_vent_hypertrophy transmed:TMO_0185 ?left_vent_hypertrophy_value. 
+}
+
+FILTER  ( ?user_name = '{USER}').
+}

@@ -1,0 +1,68 @@
+PREFIX : <http://www.semanticweb.org/kondylak/ontologies/2013/1/untitled-ontology-86#>
+PREFIX obo: <http://purl.obolibrary.org/obo/>
+PREFIX ro: <http://www.obofoundry.org/ro/ro.owl#>
+PREFIX transmed: <http://www.w3.org/2001/sw/hcls/ns/transmed/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX acgt:<http://www.ifomis.org/acgt/1.0#>
+PREFIX snomedct:<http://purl.bioontology.org/ontology/SNOMEDCT/>
+
+SELECT DISTINCT ?user_name  ?date ?source ?distance ?steps_no ?elevation_no ?duration_no
+#?details 
+# ?distance ?title 
+WHERE {
+
+#patient has name
+	?patient foaf:accountName ?user_name.
+
+#patient participates in dayly action
+	?patient ro:participates_in ?daily_action.
+
+#daily_action isa daily action
+	?daily_action a transmed:daily_action.
+
+# source
+	?daily_action transmed:tags ?source.
+
+#details 
+#	?daily_action transmed:comment ?details.
+
+
+# date
+	?daily_action transmed:has_date ?date.
+
+OPTIONAL{
+#distance
+ 	?daily_action acgt:reveals ?dist.
+        ?dist transmed:has_title 'distance'.
+	?dist transmed:TMO_0185 ?distance.
+}
+
+OPTIONAL
+{
+#steps
+ 	?daily_action acgt:reveals ?steps.
+        ?steps transmed:has_title 'steps'.
+	?steps transmed:TMO_0185 ?steps_no.
+}
+
+OPTIONAL
+{	
+#elevation
+ 	?daily_action acgt:reveals ?elevation.
+        ?elevation transmed:has_title 'elevation'.
+	?elevation transmed:TMO_0185 ?elevation_no.
+}
+
+
+OPTIONAL
+{	
+#duration
+ 	?daily_action acgt:reveals ?duration.
+        ?duration transmed:has_title 'duration'.
+	?duration transmed:TMO_0185 ?duration_no.
+}
+
+FILTER  ( ?user_name = '{USER}').
+}

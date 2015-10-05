@@ -1,0 +1,40 @@
+PREFIX : <http://www.semanticweb.org/kondylak/ontologies/2013/1/untitled-ontology-86#>
+PREFIX obo: <http://purl.obolibrary.org/obo/>
+PREFIX ro: <http://www.obofoundry.org/ro/ro.owl#>
+PREFIX transmed: <http://www.w3.org/2001/sw/hcls/ns/transmed/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX acgt:<http://www.ifomis.org/acgt/1.0#>
+PREFIX snomedct:<http://purl.bioontology.org/ontology/SNOMEDCT/>
+
+SELECT DISTINCT ?user_name ?start_date_value ?text ?details ?tags ?value
+WHERE {
+
+#patient has name
+	?patient foaf:accountName ?user_name.
+
+#patient has action specification
+	?activity  transmed:TMO_0185 ?patient .
+
+#activity has starting date
+	?activity ro:starts ?start_date.
+	?start_date transmed:has_date ?start_date_value.
+
+
+#activity has text
+	?activity transmed:has_title ?text.
+
+
+#activity has text
+	?activity transmed:comment ?details.
+
+#activity has tags
+	?activity transmed:tags ?tags.
+
+
+#activity has value
+	?activity transmed:TMO_0185 ?value.
+
+FILTER  ( ?user_name = '{USER}').
+}
