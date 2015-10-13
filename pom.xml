@@ -14,6 +14,13 @@
         </repository>
     </repositories>
 
+    <pluginRepositories>
+        <pluginRepository>
+            <id>onejar-maven-plugin.googlecode.com</id>
+            <url>http://onejar-maven-plugin.googlecode.com/svn/mavenrepo</url>
+        </pluginRepository>
+    </pluginRepositories>
+
     <build>
     <plugins>
         <plugin>
@@ -24,6 +31,29 @@
                 <source>1.8</source>
                 <target>1.8</target>
             </configuration>
+        </plugin>
+        <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-jar-plugin</artifactId>
+            <configuration>
+                <archive>
+                    <manifest>
+                        <mainClass>MHAClinicalAPI</mainClass>
+                    </manifest>
+                </archive>
+            </configuration>
+        </plugin>
+        <plugin>
+            <groupId>org.dstovall</groupId>
+            <artifactId>onejar-maven-plugin</artifactId>
+            <version>1.4.4</version>
+            <executions>
+                <execution>
+                    <goals>
+                        <goal>one-jar</goal>
+                    </goals>
+                </execution>
+            </executions>
         </plugin>
     </plugins>
     </build>
@@ -45,9 +75,9 @@
             <version>3.5</version>
         </dependency>
         <dependency>
-            <groupId>com.googlecode.json-simple</groupId>
-            <artifactId>json-simple</artifactId>
-            <version>1.1.1</version>
+        <groupId>net.minidev</groupId>
+        <artifactId>json-smart</artifactId>
+        <version>2.2</version>
         </dependency>
         <dependency>
             <groupId>com.datastax.cassandra</groupId>
@@ -63,6 +93,22 @@
             <groupId>org.jboss.logging</groupId>
             <artifactId>jboss-logging</artifactId>
             <version>3.3.0.Final</version>
+        </dependency>
+        <dependency>
+            <groupId>pixelmed</groupId>
+            <artifactId>pixelmed</artifactId>
+            <version>20150809</version>
+        </dependency>
+
+        <dependency>
+            <groupId>javax.media</groupId>
+            <artifactId>jai_imageio</artifactId>
+            <version>1.1</version>
+        </dependency>
+        <dependency>
+            <groupId>javax.vecmath</groupId>
+            <artifactId>vecmath</artifactId>
+            <version>1.5.2</version>
         </dependency>
     </dependencies>
 
