@@ -23,6 +23,7 @@ public class Configuration {
     private String dicomCallingAET;
     private String dicomCalledAET;
     private int dicomPort;
+    private String wadoUrl;
 
     private Configuration() {}
 
@@ -57,6 +58,7 @@ public class Configuration {
             config.dicomCalledAET = config.properties.getProperty("DICOM_SERVER_AET");
             config.dicomCallingAET = config.properties.getProperty("DICOM_MY_AET");
             config.dicomPort = Optional.of(config.properties.getProperty("DICOM_SERVER_PORT")).map(Integer::parseInt).orElse(11112);
+            config.wadoUrl = config.properties.getProperty("DICOM_WADO_URL");
 
 
             String my_host = config.properties.getProperty("MY_HOST");
@@ -109,6 +111,10 @@ public class Configuration {
 
     public String getDicomHost() {
         return dicomHost;
+    }
+
+    public String getWadoUrl() {
+        return wadoUrl;
     }
 
     public String getMyURI() {

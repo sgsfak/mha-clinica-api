@@ -1,16 +1,15 @@
+import com.ning.http.client.*;
 import com.pixelmed.dicom.*;
 import com.pixelmed.display.ConsumerFormatImageMaker;
 import com.pixelmed.network.*;
 
-import javax.swing.text.html.Option;
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
-import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -23,8 +22,14 @@ public class DICOMClient {
     private String myAET = "MHAUploadAPI";
     private String srvAET = "MHA";
 
+    AsyncHttpClient httpClient;
 
-    DICOMClient() {}
+    DICOMClient() {
+        httpClient = new AsyncHttpClient(new AsyncHttpClientConfig.Builder()
+                .setAllowPoolingConnections(true)
+                //.setMaxConnectionsPerHost(10)
+                .build());
+    }
 
     public DICOMClient setHost(String host) {
         this.host = host;
@@ -250,6 +255,81 @@ public class DICOMClient {
 
 
         return sentInstances;
+    }
+
+    private String wadoUrl = "http://localhost:8080/wado";
+
+    public void setWadoUrl(String wadoUrl) {
+        this.wadoUrl = wadoUrl;
+    }
+
+    public class FileSaveHandler extends AsyncCompletionHandlerBase {
+
+        private Path path;
+        private FileOutputStream fos;
+        private CompletableFuture<Path> fut;
+        private boolean error = false;
+
+        FileSaveHandler(Path f, CompletableFuture<Path> fut) throws FileNotFoundException {
+            this.path = f;
+            this.fos = new FileOutputStream(f.toFile());
+            this.fut = fut;
+        }
+
+        @Override
+        public STATE onStatusReceived(HttpResponseStatus status) throws Exception {
+            if (status.getStatusCode() / 100 == 2)
+                return STATE.CONTINUE;
+            error = true;
+            return STATE.ABORT;
+
+        }
+        @Override
+        public STATE onBodyPartReceived(HttpResponseBodyPart bodyPart) throws Exception {
+            fos.write(bodyPart.getBodyPartBytes());
+            // System.out.println("Called "+bodyPart.length());
+            return STATE.CONTINUE;
+        }
+
+
+        @Override
+        public Response onCompleted(Response response) throws Exception {
+            // System.out.println(" * " + this.path + " Error? " + error);
+            fos.close();
+            if (error)
+                fut.complete(null);
+            else
+                fut.complete(this.path);
+            return response;
+        }
+        @Override
+        public void onThrowable(Throwable t) {
+            t.printStackTrace();
+            error = true;
+        }
+    }
+    public CompletableFuture<Path> wado_retrieve_instance(final String instanceUID, final Path saveTo,
+                                                                    final boolean downloadJpeg)  {
+        Request r = new RequestBuilder()
+                .setMethod("GET")
+                .setUrl(wadoUrl)
+                .addQueryParam("requestType", "WADO")
+                .addQueryParam("studyUID", "")
+                .addQueryParam("seriesUID", "")
+                .addQueryParam("objectUID", instanceUID)
+                .addQueryParam("contentType", downloadJpeg ? "image/jpeg" : "application/dicom")
+                .build();
+        // System.out.println("-->" + r.getUri());
+        CompletableFuture<Path> fut = new CompletableFuture<>();
+        try {
+            final FileSaveHandler handler;
+            handler = new FileSaveHandler(saveTo, fut);
+            this.httpClient.executeRequest(r, handler);
+        } catch (FileNotFoundException e) {
+            e.printStackTrace();
+            fut = CompletableFuture.completedFuture(null);
+        }
+        return fut;
     }
 
 }

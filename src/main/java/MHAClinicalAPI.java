@@ -5,7 +5,9 @@
 import com.datastax.driver.core.Row;
 import com.opencsv.CSVReader;
 import io.undertow.Undertow;
+import io.undertow.io.DefaultIoCallback;
 import io.undertow.io.IoCallback;
+import io.undertow.io.Sender;
 import io.undertow.server.HttpHandler;
 import io.undertow.server.HttpServerExchange;
 import io.undertow.server.handlers.form.FormData;
@@ -23,6 +25,8 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URLEncoder;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.FileSystem;
 import java.time.LocalDate;
@@ -52,6 +56,8 @@ public class MHAClinicalAPI {
     }
 
 
+    static final DICOMClient dicomClient = new DICOMClient();
+
     public static void get_dcm_image(final String user, final String series_id, HttpServerExchange exchange) {
 
         CassandraClient.DB.executeAsync("select icon_jpg from dcm_images where mha_uid=? and series_uid=? limit 1", user, series_id)
@@ -65,9 +71,122 @@ public class MHAClinicalAPI {
                     final ByteBuffer iconJpg = one.getBytes("icon_jpg");
 
                     exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "image/jpeg");
+                    exchange.getResponseHeaders().put(Headers.CACHE_CONTROL, "max-age=86400");
                     exchange.getResponseSender().send(iconJpg);
                     exchange.endExchange();
                 });
+    }
+
+    private static <T> CompletableFuture<List<T>> sequence(List<CompletableFuture<T>> futures) {
+        CompletableFuture<Void> allDoneFuture =
+                CompletableFuture.allOf(futures.toArray(new CompletableFuture[futures.size()]));
+        return allDoneFuture.thenApply(v ->
+                        futures.stream().
+                                map(future -> future.join()).
+                                collect(Collectors.<T>toList())
+        );
+    }
+
+    static final void zipDir(Path dir, Path outZip) throws IOException {
+        // See http://docs.oracle.com/javase/7/docs/technotes/guides/io/fsp/zipfilesystemprovider.html
+        try {
+            URI uri = new URI("jar", outZip.toUri().toString(), null);
+            // if (outZip.toFile().exists())       outZip.toFile().delete();
+            try (FileSystem fileSystem = FileSystems.newFileSystem(uri, Collections.singletonMap("create", "true"))) {
+                Files.walk(dir).filter(path -> !path.toFile().isHidden()).forEach(path -> {
+                            String targetPath = "/" + dir.getParent().relativize(path);
+                            // System.out.println("Adding " + path + " to " + targetPath);
+                            try {
+                                Files.copy(path.toAbsolutePath(),
+                                        fileSystem.getPath("/").resolve(targetPath),
+                                        StandardCopyOption.REPLACE_EXISTING);
+                            } catch (IOException e) {
+                                e.printStackTrace();
+                            }
+                        }
+
+                );
+            }
+        } catch (URISyntaxException e) {
+            e.printStackTrace();
+        }
+
+    }
+
+    public static void get_dcm_series(final String user, final String series_id, HttpServerExchange exchange) {
+
+        CassandraClient.DB.executeAsync("select instance_uids from dcm_images where mha_uid=? and series_uid=? limit 1", user, series_id)
+                .thenAcceptAsync(rows -> {
+                    final Row one = rows.one();
+                    if (one == null) {
+                        exchange.setStatusCode(StatusCodes.NOT_FOUND);
+                        exchange.endExchange();
+                        return;
+                    }
+
+                    final List<String> instanceUids = one.getList("instance_uids", String.class);
+                    try {
+                        System.out.println(Thread.currentThread().getName() + " Got instanceUids");
+                        final Path tempDirectory = Files.createTempDirectory("mha-series-");
+                        final Path tempFile = Paths.get(System.getProperty("java.io.tmpdir"), "mha-" + UUID.randomUUID().toString() + ".zip");
+                        final List<CompletableFuture<Path>> futures = instanceUids.stream()
+                                .map(uid -> dicomClient.wado_retrieve_instance(uid, tempDirectory.resolve(uid), false))
+                                .collect(toList());
+                        sequence(futures).thenAcceptAsync(paths -> {
+                            System.out.println(Thread.currentThread().getName() + "Check temp dir " + tempDirectory + " zip " + tempFile);
+
+                            try {
+                                zipDir(tempDirectory, tempFile);
+                                System.out.println(Thread.currentThread().getName() + " Check zip file " + tempFile);
+
+                                exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "application/zip");
+                                exchange.getResponseHeaders().put(Headers.CONTENT_LENGTH, tempFile.toFile().length());
+                                exchange.getResponseHeaders().put(HttpString.tryFromString("Content-Disposition"),
+                                        String.format("attachment; filename=series-%s.zip", series_id));
+                                exchange.getResponseSender().transferFrom(FileChannel.open(tempFile), new DefaultIoCallback() {
+                                    @Override
+                                    public void onComplete(HttpServerExchange httpServerExchange, Sender sender) {
+                                        safelyDeleteFileOrDir(tempDirectory);
+                                        safelyDeleteFileOrDir(tempFile);
+                                        super.onComplete(exchange, sender);
+                                    }
+                                    @Override
+                                    public void onException(final HttpServerExchange exchange, final Sender sender, final IOException exception) {
+                                        safelyDeleteFileOrDir(tempDirectory);
+                                        safelyDeleteFileOrDir(tempFile);
+                                        super.onException(exchange, sender, exception);
+                                    }
+
+                                });
+                            } catch (Exception e) {
+                                e.printStackTrace();
+                                exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
+                                exchange.endExchange();
+                            }
+                        });
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                        exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
+                        exchange.endExchange();
+                    }
+                });
+
+    }
+
+    private static void safelyDeleteFileOrDir(Path path) {
+        try (Stream<Path> pathStream = Files.walk(path)) {
+            pathStream.sorted(Comparator.comparing(Path::getNameCount).reversed())
+                    .forEach(p -> {
+                        try {
+                            // System.out.println("Deleting " + p);
+                            Files.delete(p);
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        }
+                    });
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
     public static void ask_cassandra(final String user, final String baseURI, HttpServerExchange exchange) {
@@ -147,7 +266,7 @@ public class MHAClinicalAPI {
                     //System.out.println("signs " + Thread.currentThread().getName());
                     List<JSONObject> list = rows.all().stream()
                             .filter(row -> {
-                                LocalDate when = row.getTimestamp("when").toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+                                LocalDate when = row.getTimestamp("happened").toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
                                 boolean no_contains = when.isBefore(from) || when.isAfter(to);
                                 return !no_contains;
                             })
@@ -157,7 +276,7 @@ public class MHAClinicalAPI {
                                 sign.put("title", row.getString("title"));
                                 sign.put("units", row.getString("units"));
                                 sign.put("value", row.getFloat("value"));
-                                String when = row.getTimestamp("when").toInstant().toString();
+                                String when = row.getTimestamp("happened").toInstant().toString();
                                 sign.put("when", when.substring(0, 10));
 
                                 return sign;
@@ -188,7 +307,8 @@ public class MHAClinicalAPI {
                                         img.put("instance_uids", instance_uids);
                                         img.put("count", instance_uids.size());
                                         try {
-                                            img.put("href", String.format("%s/dcm?u=%s&id=%s", baseURI, URLEncoder.encode(user, "UTF-8"), series_uid));
+                                            img.put("icon", String.format("%s/dcm.jpg?u=%s&id=%s", baseURI, URLEncoder.encode(user, "UTF-8"), series_uid));
+                                            img.put("uri", String.format("%s/dcm?u=%s&id=%s", baseURI, URLEncoder.encode(user, "UTF-8"), series_uid));
                                         } catch (UnsupportedEncodingException e) {
                                         }
                                         return img;
@@ -225,8 +345,8 @@ public class MHAClinicalAPI {
                     resObj.put("summary", summary);
                     resObj.put("medical_images", images);
                     exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "application/json");
-                    exchange.getResponseSender().send(resObj.toJSONString());
-                    exchange.endExchange();
+                    final String jsonString = resObj.toJSONString();
+                    exchange.getResponseSender().send(jsonString);
                     // System.out.println("Returned...");
                 });
 
@@ -319,6 +439,7 @@ public class MHAClinicalAPI {
 
     public static void main(String... args) {
 
+
         if (args.length == 0) {
             System.err.println("Usage:\n\t java MHAClinicalAPI <config.properties>\nwhere config.properties is a properties file..");
             System.exit(-1);
@@ -326,15 +447,17 @@ public class MHAClinicalAPI {
         Configuration config = Configuration.create(args[0]);
         assert config != null;
 
+
         //System.err.println("Configuration:\n"+config);
 
-        DICOMClient dcmClient = new DICOMClient().setHost(config.getDicomHost())
+        dicomClient.setHost(config.getDicomHost())
                 .setPort(config.getDicomPort())
                 .setMyAET(config.getDicomCallingAET())
-                .setSrvAET(config.getDicomCalledAET());
+                .setSrvAET(config.getDicomCalledAET())
+                .setWadoUrl(config.getWadoUrl());
 
-        if (!dcmClient.verifyServer()) {
-            System.out.println("DICOM Server verification " + dcmClient + " failed in C-ECHO");
+        if (!dicomClient.verifyServer()) {
+            System.out.println("DICOM Server verification " + dicomClient + " failed in C-ECHO");
             return;
         }
 
@@ -370,7 +493,7 @@ public class MHAClinicalAPI {
                             );
                         })
 
-                        .get("/dcm", exchange -> {
+                        .get("/dcm.jpg", exchange -> {
                             Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
                             if (!queryParameters.containsKey("u")) {
                                 exchange.setStatusCode(StatusCodes.NOT_FOUND);
@@ -385,6 +508,25 @@ public class MHAClinicalAPI {
                             String id = queryParameters.get("id").getFirst();
                             exchange.dispatch(exchange.isInIoThread() ? SameThreadExecutor.INSTANCE : exchange.getIoThread(),
                                     () -> get_dcm_image(user, id, exchange)
+                            );
+
+                        })
+
+                        .get("/dcm", exchange -> { // Retrieve a whole series
+                            Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
+                            if (!queryParameters.containsKey("u")) {
+                                exchange.setStatusCode(StatusCodes.NOT_FOUND);
+                                exchange.getResponseSender().send("You must specify the 'user' in the 'u' query parameter");
+                                return;
+                            } else if (!queryParameters.containsKey("id")) {
+                                exchange.setStatusCode(StatusCodes.NOT_FOUND);
+                                exchange.getResponseSender().send("You must specify the 'id' query parameter");
+                                return;
+                            }
+                            String user = queryParameters.get("u").getFirst();
+                            String seriesUid = queryParameters.get("id").getFirst();
+                            exchange.dispatch(exchange.isInIoThread() ? SameThreadExecutor.INSTANCE : exchange.getIoThread(),
+                                    () -> get_dcm_series(user, seriesUid, exchange)
                             );
 
                         })
@@ -404,6 +546,7 @@ public class MHAClinicalAPI {
                                     @Override
                                     public void handleRequest(HttpServerExchange exchange) throws Exception {
                                         //  System.out.println(exchange.isInIoThread() + " " + Thread.currentThread().getName());
+
                                         if (exchange.isInIoThread()) {
                                             exchange.dispatch(this);
                                             return;
@@ -414,6 +557,9 @@ public class MHAClinicalAPI {
 
 
                                             FormData data = formDataParser.parseBlocking();
+
+
+                                            String user = data.getFirst("username").getValue();
 
                                             int chunkNumber = Integer.parseInt(data.getFirst("resumableChunkNumber").getValue());
                                             int totalChunks = Integer.parseInt(data.getFirst("resumableTotalChunks").getValue());
@@ -478,8 +624,8 @@ public class MHAClinicalAPI {
                                                                 Path outputDir = Paths.get(tempStoreDir, identifier);
                                                                 try {
                                                                     unzipFile(outputDir, finalFile.toFile());
-                                                                    List<DICOMClient.Instance> lst = dcmClient.sendDcmFile(outputDir);
-                                                                    store_images("zdeng", lst);
+                                                                    List<DICOMClient.Instance> lst = dicomClient.sendDcmFile(outputDir);
+                                                                    store_images(user, lst);
 
                                                                 } catch (Throwable t) {
                                                                     t.printStackTrace();
