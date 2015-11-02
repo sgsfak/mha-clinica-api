@@ -14,13 +14,10 @@ public class SPARQLClient {
 
     private AsyncHttpClient asyncHttpClient;
 
-    SPARQLClient()
+    SPARQLClient(AsyncHttpClient asyncHttpClient)
     {
-        asyncHttpClient = new AsyncHttpClient(new AsyncHttpClientConfig.Builder()
-                .setAllowPoolingConnections(true)
-                .setExecutorService(Executors.newCachedThreadPool())
-                .setMaxConnectionsPerHost(100)
-                .build());
+        this.asyncHttpClient = asyncHttpClient;
+
     }
     CompletableFuture<String> send_query(final String query)
     {

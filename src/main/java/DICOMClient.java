@@ -24,11 +24,8 @@ public class DICOMClient {
 
     AsyncHttpClient httpClient;
 
-    DICOMClient() {
-        httpClient = new AsyncHttpClient(new AsyncHttpClientConfig.Builder()
-                .setAllowPoolingConnections(true)
-                //.setMaxConnectionsPerHost(10)
-                .build());
+    DICOMClient(AsyncHttpClient httpClient) {
+        this.httpClient = httpClient;
     }
 
     public DICOMClient setHost(String host) {

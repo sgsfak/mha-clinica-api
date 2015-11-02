@@ -3,6 +3,8 @@
  */
 
 import com.datastax.driver.core.Row;
+import com.ning.http.client.AsyncHttpClient;
+import com.ning.http.client.AsyncHttpClientConfig;
 import com.opencsv.CSVReader;
 import io.undertow.Undertow;
 import io.undertow.io.DefaultIoCallback;
@@ -26,7 +28,6 @@ import java.net.URISyntaxException;
 import java.net.URLEncoder;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.FileSystem;
 import java.time.LocalDate;
@@ -35,6 +36,7 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -56,7 +58,7 @@ public class MHAClinicalAPI {
     }
 
 
-    static final DICOMClient dicomClient = new DICOMClient();
+    static DICOMClient dicomClient;
 
     public static void get_dcm_image(final String user, final String series_id, HttpServerExchange exchange) {
 
@@ -133,11 +135,11 @@ public class MHAClinicalAPI {
                                 .map(uid -> dicomClient.wado_retrieve_instance(uid, tempDirectory.resolve(uid), false))
                                 .collect(toList());
                         sequence(futures).thenAcceptAsync(paths -> {
-                            System.out.println(Thread.currentThread().getName() + "Check temp dir " + tempDirectory + " zip " + tempFile);
+                            //System.out.println(Thread.currentThread().getName() + "Check temp dir " + tempDirectory + " zip " + tempFile);
 
                             try {
                                 zipDir(tempDirectory, tempFile);
-                                System.out.println(Thread.currentThread().getName() + " Check zip file " + tempFile);
+                                //System.out.println(Thread.currentThread().getName() + " Check zip file " + tempFile);
 
                                 exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "application/zip");
                                 exchange.getResponseHeaders().put(Headers.CONTENT_LENGTH, tempFile.toFile().length());
@@ -447,9 +449,14 @@ public class MHAClinicalAPI {
         Configuration config = Configuration.create(args[0]);
         assert config != null;
 
-
+        AsyncHttpClient asyncHttpClient = new AsyncHttpClient(new AsyncHttpClientConfig.Builder()
+                .setAllowPoolingConnections(true)
+                .setExecutorService(Executors.newCachedThreadPool())
+               // .setMaxConnectionsPerHost(100)
+                .build());
         //System.err.println("Configuration:\n"+config);
 
+        dicomClient = new DICOMClient(asyncHttpClient);
         dicomClient.setHost(config.getDicomHost())
                 .setPort(config.getDicomPort())
                 .setMyAET(config.getDicomCallingAET())
@@ -462,7 +469,7 @@ public class MHAClinicalAPI {
         }
 
         CassandraClient.DB.connect(config.getCassandraKeyspace(), config.getCassandraUser(), config.getCassandraPwd(), config.getCassandraHost());
-        final SPARQLClient sc = new SPARQLClient();
+        final SPARQLClient sc = new SPARQLClient(asyncHttpClient);
         // String activities_query = readQueryFromFile("Activities.sparql");
         // String diary_query = readQueryFromFile("Diary.sparql");
         // System.out.println(activities_query);
