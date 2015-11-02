@@ -10,10 +10,7 @@ import io.undertow.Undertow;
 import io.undertow.io.DefaultIoCallback;
 import io.undertow.io.IoCallback;
 import io.undertow.io.Sender;
-import io.undertow.server.HttpHandler;
 import io.undertow.server.HttpServerExchange;
-import io.undertow.server.handlers.form.FormData;
-import io.undertow.server.handlers.form.FormDataParser;
 import io.undertow.server.handlers.form.MultiPartParserDefinition;
 import io.undertow.util.Headers;
 import io.undertow.util.HttpString;
@@ -23,13 +20,10 @@ import net.minidev.json.JSONArray;
 import net.minidev.json.JSONObject;
 
 import java.io.*;
-import java.net.URI;
-import java.net.URISyntaxException;
 import java.net.URLEncoder;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
-import java.nio.file.FileSystem;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
@@ -37,11 +31,8 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ForkJoinPool;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
 
 import static io.undertow.Handlers.routing;
 import static java.util.stream.Collectors.*;
@@ -89,31 +80,6 @@ public class MHAClinicalAPI {
         );
     }
 
-    static final void zipDir(Path dir, Path outZip) throws IOException {
-        // See http://docs.oracle.com/javase/7/docs/technotes/guides/io/fsp/zipfilesystemprovider.html
-        try {
-            URI uri = new URI("jar", outZip.toUri().toString(), null);
-            // if (outZip.toFile().exists())       outZip.toFile().delete();
-            try (FileSystem fileSystem = FileSystems.newFileSystem(uri, Collections.singletonMap("create", "true"))) {
-                Files.walk(dir).filter(path -> !path.toFile().isHidden()).forEach(path -> {
-                            String targetPath = "/" + dir.getParent().relativize(path);
-                            // System.out.println("Adding " + path + " to " + targetPath);
-                            try {
-                                Files.copy(path.toAbsolutePath(),
-                                        fileSystem.getPath("/").resolve(targetPath),
-                                        StandardCopyOption.REPLACE_EXISTING);
-                            } catch (IOException e) {
-                                e.printStackTrace();
-                            }
-                        }
-
-                );
-            }
-        } catch (URISyntaxException e) {
-            e.printStackTrace();
-        }
-
-    }
 
     public static void get_dcm_series(final String user, final String series_id, HttpServerExchange exchange) {
 
@@ -138,7 +104,7 @@ public class MHAClinicalAPI {
                             //System.out.println(Thread.currentThread().getName() + "Check temp dir " + tempDirectory + " zip " + tempFile);
 
                             try {
-                                zipDir(tempDirectory, tempFile);
+                                ZipUtils.zipDir(tempDirectory, tempFile);
                                 //System.out.println(Thread.currentThread().getName() + " Check zip file " + tempFile);
 
                                 exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "application/zip");
@@ -412,33 +378,6 @@ public class MHAClinicalAPI {
         });
     }
 
-    private static void visitEntries(final Path zipPath, FileVisitor<Path> visitor) throws IOException {
-        try (FileSystem fs = FileSystems.newFileSystem(new URI("jar", zipPath.toUri().toString(), null), Collections.singletonMap("create", "false"), null)) {
-            fs.getRootDirectories().forEach(root -> {
-                try {
-                    Files.walkFileTree(root, visitor);
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            });
-
-        } catch (URISyntaxException e) {
-            e.printStackTrace();
-        }
-
-    }
-
-    private static boolean isZipFile(final Path file) {
-        try (DataInputStream in = new DataInputStream(new FileInputStream(file.toFile()))) {
-            boolean isZip = in.readInt() == 0x504b0304;
-            return isZip;
-        } catch (IOException ex) {
-            ex.printStackTrace();
-            return false;
-        }
-
-    }
-
     public static void main(String... args) {
 
 
@@ -549,113 +488,7 @@ public class MHAClinicalAPI {
                             exchange.endExchange();
 
                         })
-                        .post("/upload", new HttpHandler() {
-                                    @Override
-                                    public void handleRequest(HttpServerExchange exchange) throws Exception {
-                                        //  System.out.println(exchange.isInIoThread() + " " + Thread.currentThread().getName());
-
-                                        if (exchange.isInIoThread()) {
-                                            exchange.dispatch(this);
-                                            return;
-                                        }
-                                        exchange.startBlocking();
-
-                                        try (FormDataParser formDataParser = m.create(exchange)) {
-
-
-                                            FormData data = formDataParser.parseBlocking();
-
-
-                                            String user = data.getFirst("username").getValue();
-
-                                            int chunkNumber = Integer.parseInt(data.getFirst("resumableChunkNumber").getValue());
-                                            int totalChunks = Integer.parseInt(data.getFirst("resumableTotalChunks").getValue());
-                                            long chunkSize = Long.parseLong(data.getFirst("resumableChunkSize").getValue());
-
-                                            String identifier = data.getFirst("resumableIdentifier").getValue();
-                                            long totalSize = Long.parseLong(data.getFirst("resumableTotalSize").getValue());
-                                            String filename = data.getFirst("resumableFilename").getValue();
-
-                                            final Path tempFile = data.getFirst("file").getPath();
-
-                                            if (chunkNumber < totalChunks && tempFile.toFile().length() < chunkSize) {
-                                            /*
-
-
-                                                The chuck has not been transferred in its entirety!
-                                                Say to client to re-upload it
-
-                                                The documentation at https://github.com/23/resumable.js says:
-                                                    For every request, you can confirm reception in HTTP status codes:
-                                                    200: The chunk was accepted and correct. No need to re-upload.
-                                                    404, 415. 500, 501: The file for which the chunk was uploaded is not supported, cancel the entire upload.
-                                                    Anything else: Something went wrong, but try re-uploading the file.
-
-                                            */
-                                                exchange.setStatusCode(StatusCodes.BAD_REQUEST); // 400
-                                                exchange.endExchange();
-                                                return;
-                                            }
-                                            final Path dir = Files.createDirectories(Paths.get(tempUploadDir + identifier));
-                                            final String partFileName = partFileName(chunkNumber);
-                                            final Path partFile = Paths.get(dir.toString(), partFileName);
-                                            Files.move(tempFile, partFile);
-
-                                            List<File> parts;
-                                            try (final Stream<Path> pathStream = Files.walk(dir, 1)) {
-                                                parts = pathStream
-                                                        .map(Path::toFile)
-                                                        .filter(file -> file.isFile() && file.getName().startsWith("part"))
-                                                        .collect(toList());
-                                            }
-                                            final long curSize = parts.stream().collect(summingLong(File::length));
-
-
-                                            System.out.printf("[%s]: CurSize: %d TotalSize: %d\n", Thread.currentThread().getName(), curSize, totalSize);
-
-                                            if (curSize >= totalSize) {
-                                                try {
-                                                    Path finalFile = Files.createFile(Paths.get(dir.toString(), filename));
-
-                                                    try (RandomAccessFile raf = new RandomAccessFile(finalFile.toString(), "rw")) {
-                                                        for (int i = 1; i <= totalChunks; ++i) {
-                                                            final String fileName = partFileName(i);
-                                                            final Path partPath = Paths.get(dir.toString(), fileName);
-                                                            raf.write(Files.readAllBytes(partPath));
-                                                            Files.delete(partPath);
-                                                        }
-                                                        System.out.println(Thread.currentThread().getName() + " Created... ");
-
-                                                        if (isZipFile(finalFile)) {
-                                                            ForkJoinPool.commonPool().execute(() -> {
-                                                                Path outputDir = Paths.get(tempStoreDir, identifier);
-                                                                try {
-                                                                    unzipFile(outputDir, finalFile.toFile());
-                                                                    List<DICOMClient.Instance> lst = dicomClient.sendDcmFile(outputDir);
-                                                                    store_images(user, lst);
-
-                                                                } catch (Throwable t) {
-                                                                    t.printStackTrace();
-                                                                }
-                                                            });
-                                                        }
-                                                        exchange.setStatusCode(StatusCodes.OK);
-                                                        exchange.getResponseHeaders().put(HttpString.tryFromString("Access-Control-Allow-Origin"), "*");
-                                                        exchange.getResponseSender().send("Filename: " + filename + " saved...", IoCallback.END_EXCHANGE);
-                                                    }
-                                                } catch (FileAlreadyExistsException ex) {
-                                                    System.out.println(Thread.currentThread().getName() + " Final file exists...");
-                                                }
-                                            } else {
-                                                exchange.setStatusCode(StatusCodes.OK);
-                                                exchange.getResponseHeaders().put(HttpString.tryFromString("Access-Control-Allow-Origin"), "*");
-                                                exchange.getResponseSender().send("OK", IoCallback.END_EXCHANGE);
-                                            }
-                                        }
-                                    }
-                                }
-
-                        )).
+                        .post("/upload", new UploadHandler(m, tempUploadDir, tempStoreDir))).
                         build();
 
         server.start();
@@ -663,35 +496,5 @@ public class MHAClinicalAPI {
         System.out.printf("Server started, listening at %d\n", port);
     }
 
-    private static void unzipFile(Path outputDir, File zipFile) throws IOException {
-        try (ZipInputStream zis = new ZipInputStream(new FileInputStream(zipFile))) {
-            final int MAX_BUF = 4 * 1024 * 1024;
-            byte buffer[] = new byte[MAX_BUF];
-            for (ZipEntry entry = zis.getNextEntry(); entry != null; entry = zis.getNextEntry()) {
-                final Path outputEntryPath = Paths.get(outputDir.toString(), entry.getName());
-                if (entry.isDirectory()) {
-                    Files.createDirectories(outputEntryPath);
-                } else {
-                    if (!Files.exists(outputEntryPath.getParent())) {
-                        Files.createDirectories(outputEntryPath.getParent());
-                    }
-                    try (FileOutputStream fos = new FileOutputStream(outputEntryPath.toString())) {
-                        while (true) {
-                            int k = zis.read(buffer, 0, MAX_BUF);
-                            if (k > 0)
-                                fos.write(buffer, 0, k);
-                            else
-                                break;
-                        }
-                    }
-                    // System.out.println("==> wrote " + entry.getName() + " at " + outputEntryPath);
-                }
-                zis.closeEntry();
-            }
-        }
-    }
 
-    private static String partFileName(int chunkNumber) {
-        return String.format("part_%05d", chunkNumber);
-    }
 }
