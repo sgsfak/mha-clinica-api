@@ -28,8 +28,9 @@ class UploadHandler implements HttpHandler {
     private final String tempUploadDir;
     private final String tempStoreDir;
 
-    public UploadHandler(MultiPartParserDefinition m, String tempUploadDir, String tempStoreDir) {
-        this.m = m;
+    public UploadHandler(String tempUploadDir, String tempStoreDir) {
+        this.m = new MultiPartParserDefinition();
+        this.m.setMaxIndividualFileSize(10 * 1024 * 1024);
         this.tempUploadDir = tempUploadDir;
         this.tempStoreDir = tempStoreDir;
     }

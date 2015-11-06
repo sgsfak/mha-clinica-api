@@ -3,6 +3,7 @@
  */
 
 import com.datastax.driver.core.Row;
+import com.google.common.net.HttpHeaders;
 import com.ning.http.client.AsyncHttpClient;
 import com.ning.http.client.AsyncHttpClientConfig;
 import com.opencsv.CSVReader;
@@ -11,7 +12,6 @@ import io.undertow.io.DefaultIoCallback;
 import io.undertow.io.IoCallback;
 import io.undertow.io.Sender;
 import io.undertow.server.HttpServerExchange;
-import io.undertow.server.handlers.form.MultiPartParserDefinition;
 import io.undertow.util.Headers;
 import io.undertow.util.HttpString;
 import io.undertow.util.SameThreadExecutor;
@@ -75,24 +75,24 @@ public class MHAClinicalAPI {
                 CompletableFuture.allOf(futures.toArray(new CompletableFuture[futures.size()]));
         return allDoneFuture.thenApply(v ->
                         futures.stream().
-                                map(future -> future.join()).
-                                collect(Collectors.<T>toList())
-        );
+                                map(CompletableFuture::join).
+                                collect(Collectors.<T>toList()));
     }
 
 
-    public static void get_dcm_series(final String user, final String series_id, HttpServerExchange exchange) {
+    public static void get_dcm_series(final DICOMClient dcmClient, final String series_id, HttpServerExchange exchange) {
 
-        CassandraClient.DB.executeAsync("select instance_uids from dcm_images where mha_uid=? and series_uid=? limit 1", user, series_id)
-                .thenAcceptAsync(rows -> {
-                    final Row one = rows.one();
-                    if (one == null) {
+        dcmClient.get_series_async(series_id)
+                .thenAcceptAsync(series->{
+                    if (series.isNull()) {
                         exchange.setStatusCode(StatusCodes.NOT_FOUND);
+                        exchange.getResponseSender().send(String.format("Series <%s> does not contain any instances!\n", series_id));
                         exchange.endExchange();
                         return;
                     }
 
-                    final List<String> instanceUids = one.getList("instance_uids", String.class);
+                    List<String> instanceUids = series.instanceUID;
+
                     try {
                         System.out.println(Thread.currentThread().getName() + " Got instanceUids");
                         final Path tempDirectory = Files.createTempDirectory("mha-series-");
@@ -137,6 +137,7 @@ public class MHAClinicalAPI {
                         exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
                         exchange.endExchange();
                     }
+
                 });
 
     }
@@ -175,7 +176,7 @@ public class MHAClinicalAPI {
                     //System.out.println("uuid " + Thread.currentThread().getName());
                     final Row one = rows.one();
                     if (one == null) {
-                        exchange.setStatusCode(404);
+                        exchange.setStatusCode(StatusCodes.NOT_FOUND);
                         // exchange.endExchange();
                         throw new RuntimeException("Given patient ssn was not found");
                     }
@@ -293,8 +294,8 @@ public class MHAClinicalAPI {
                     // System.out.println("all " + Thread.currentThread().getName());
                     if (ex != null) {
                         ex.printStackTrace();
-                        if (exchange.getStatusCode() == 200)
-                            exchange.setStatusCode(500);
+                        if (exchange.getStatusCode() == StatusCodes.OK)
+                            exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
                         exchange.getResponseSender().send(ex.getMessage());
                         exchange.endExchange();
                         return;
@@ -327,9 +328,18 @@ public class MHAClinicalAPI {
                 .forEach((seriesUID, lst) -> {
                     final int index = lst.size() / 2;
                     final DICOMClient.Instance typicalInstance = lst.get(index);
-                    File iconFile = typicalInstance.createIconFile(200).orElseGet(() -> new File("Dfsfd"));
+                    Optional<File> iconFile = typicalInstance.createIconFile(200);
                     try {
-                        final ByteBuffer byteBuffer = ByteBuffer.wrap(Files.readAllBytes(iconFile.toPath()));
+                        ByteBuffer byteBuffer;
+                        if (iconFile.isPresent())
+                            byteBuffer = ByteBuffer.wrap(Files.readAllBytes(iconFile.get().toPath()));
+                        else {
+                            try (final InputStream defDicomImg = MHAClinicalAPI.class.getResourceAsStream("dicom.jpg")) {
+                                final byte[] b = new byte[defDicomImg.available()];
+                                new DataInputStream(defDicomImg).readFully(b);
+                                byteBuffer = ByteBuffer.wrap(b);
+                            }
+                        }
                         final List<String> instanceUIDs = lst.stream().map(DICOMClient.Instance::getInstanceUID).collect(toList());
                         CassandraClient.DB.executeAsync("INSERT INTO dcm_images(mha_uid, inserted, when, series_uid, study_uid, study_description, modality, icon_jpg, instance_uids) VALUES(?,now(),?, ?,?,?,?,?,?)",
                                 user_uid,
@@ -378,6 +388,11 @@ public class MHAClinicalAPI {
         });
     }
 
+    private static void quickly_dispatch(final HttpServerExchange exchange, Runnable func)
+    {
+        exchange.dispatch(exchange.isInIoThread() ? SameThreadExecutor.INSTANCE : exchange.getIoThread(),
+                func);
+    }
     public static void main(String... args) {
 
 
@@ -414,8 +429,6 @@ public class MHAClinicalAPI {
         // System.out.println(activities_query);
 
         final int port = config.getPort();
-        MultiPartParserDefinition m = new MultiPartParserDefinition();
-        m.setMaxIndividualFileSize(10 * 1024 * 1024);
 
         final String myURI = config.getMyURI();
         final String baseURI = myURI.endsWith("/") ? myURI.substring(0, myURI.length() - 1) : myURI;
@@ -426,21 +439,18 @@ public class MHAClinicalAPI {
                 .addHttpListener(port, "0.0.0.0")
                 .setHandler(routing()
                         .get("/patsum", exchange -> {
-                            Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
+                            final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
                             if (!queryParameters.containsKey("u")) {
                                 exchange.setStatusCode(StatusCodes.NOT_FOUND);
                                 exchange.getResponseSender().send("You must specify the 'user' in the 'u' query parameter");
                                 return;
                             }
-                            String user = queryParameters.get("u").getFirst();
-                            exchange.dispatch(exchange.isInIoThread() ? SameThreadExecutor.INSTANCE : exchange.getIoThread(),
-                                    // () -> ask_triplestore(sc, user, diary_query, exchange)
-                                    () -> ask_cassandra(user, baseURI, exchange)
-                            );
+                            final String user = queryParameters.get("u").getFirst();
+                            quickly_dispatch(exchange,() -> ask_cassandra(user, baseURI, exchange));
                         })
 
                         .get("/dcm.jpg", exchange -> {
-                            Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
+                            final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
                             if (!queryParameters.containsKey("u")) {
                                 exchange.setStatusCode(StatusCodes.NOT_FOUND);
                                 exchange.getResponseSender().send("You must specify the 'user' in the 'u' query parameter");
@@ -450,16 +460,14 @@ public class MHAClinicalAPI {
                                 exchange.getResponseSender().send("You must specify the 'id' query parameter");
                                 return;
                             }
-                            String user = queryParameters.get("u").getFirst();
-                            String id = queryParameters.get("id").getFirst();
-                            exchange.dispatch(exchange.isInIoThread() ? SameThreadExecutor.INSTANCE : exchange.getIoThread(),
-                                    () -> get_dcm_image(user, id, exchange)
-                            );
+                            final String user = queryParameters.get("u").getFirst();
+                            final String id = queryParameters.get("id").getFirst();
+                            quickly_dispatch(exchange, () -> get_dcm_image(user, id, exchange));
 
                         })
 
                         .get("/dcm", exchange -> { // Retrieve a whole series
-                            Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
+                            final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
                             if (!queryParameters.containsKey("u")) {
                                 exchange.setStatusCode(StatusCodes.NOT_FOUND);
                                 exchange.getResponseSender().send("You must specify the 'user' in the 'u' query parameter");
@@ -469,18 +477,54 @@ public class MHAClinicalAPI {
                                 exchange.getResponseSender().send("You must specify the 'id' query parameter");
                                 return;
                             }
-                            String user = queryParameters.get("u").getFirst();
-                            String seriesUid = queryParameters.get("id").getFirst();
-                            exchange.dispatch(exchange.isInIoThread() ? SameThreadExecutor.INSTANCE : exchange.getIoThread(),
-                                    () -> get_dcm_series(user, seriesUid, exchange)
-                            );
+                            final String user = queryParameters.get("u").getFirst();
+                            final String seriesUid = queryParameters.get("id").getFirst();
+                            quickly_dispatch(exchange, () -> get_dcm_series(dicomClient, seriesUid, exchange));
 
                         })
-                        .get("/ps", exchange -> {
-                            exchange.dispatch(exchange.isInIoThread() ? SameThreadExecutor.INSTANCE : exchange.getIoThread(),
-                                    () -> ask_cassandra("23068400115", baseURI, exchange)
-                            );
+
+                        .get("/series", exchange -> {
+                            final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
+                            if (!queryParameters.containsKey("id")) {
+                                exchange.setStatusCode(StatusCodes.NOT_FOUND);
+                                exchange.getResponseSender().send("You must specify the 'id' query parameter");
+                                return;
+                            }
+                            final String seriesUid = queryParameters.get("id").getFirst();
+                            quickly_dispatch(exchange, ()-> {
+                                dicomClient.get_series_async(seriesUid)
+                                        .thenAcceptAsync(series->{
+                                            System.out.println("Series "+ series.seriesUID + " pat id " + series.patientId + " study: " +series.studyUID + " Modality "+series.modality);
+                                            if (series.isNull()) {
+                                                exchange.setStatusCode(StatusCodes.NOT_FOUND);
+                                                exchange.getResponseSender().send(String.format("Series <%s> does not contain any instances!\n", seriesUid));
+                                                exchange.endExchange();
+                                                return;
+                                            }
+
+                                            JSONObject js = new JSONObject();
+                                            js.put("series_uid", series.seriesUID);
+                                            js.put("patient_uid", series.patientId);
+                                            js.put("study_uid", series.studyUID);
+                                            js.put("instance_uids", series.instanceUID);
+
+                                            exchange.setStatusCode(StatusCodes.OK);
+                                            exchange.getResponseHeaders().put(new HttpString(HttpHeaders.CONTENT_TYPE), "application/json");
+                                            exchange.getResponseSender().send(js.toJSONString());
+                                            exchange.endExchange();
+                                        })
+                                        .exceptionally(ex -> {
+                                            exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
+                                            exchange.getResponseHeaders().put(new HttpString(HttpHeaders.CONTENT_TYPE), "text/plain");
+                                            exchange.getResponseSender().send(ex.getMessage());
+                                            exchange.endExchange();
+                                            return null;
+                                        });
+                            });
+
+
                         })
+
                         .add("options", "/upload", exchange -> {
                             exchange.setStatusCode(StatusCodes.NO_CONTENT);
                             exchange.getResponseHeaders().put(new HttpString("Access-Control-Allow-Origin"), "*");
@@ -488,7 +532,7 @@ public class MHAClinicalAPI {
                             exchange.endExchange();
 
                         })
-                        .post("/upload", new UploadHandler(m, tempUploadDir, tempStoreDir))).
+                        .post("/upload", new UploadHandler(tempUploadDir, tempStoreDir))).
                         build();
 
         server.start();

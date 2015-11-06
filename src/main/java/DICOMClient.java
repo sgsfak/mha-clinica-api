@@ -9,7 +9,7 @@ import java.nio.file.Path;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -24,8 +24,13 @@ public class DICOMClient {
 
     AsyncHttpClient httpClient;
 
+    private ExecutorService executorService = Executors.newFixedThreadPool(5);
+
     DICOMClient(AsyncHttpClient httpClient) {
-        this.httpClient = httpClient;
+        this.httpClient = new AsyncHttpClient(new AsyncHttpClientConfig.Builder()
+                .setAllowPoolingConnections(true)
+                //.setMaxConnectionsPerHost(10)
+                .build());
     }
 
     public DICOMClient setHost(String host) {
@@ -49,8 +54,7 @@ public class DICOMClient {
     }
 
     @Deprecated
-    public static boolean isDICOMFile(Path path)
-    {
+    public static boolean isDICOMFile(Path path) {
         long magic_pos = 128;
         File file = path.toFile();
         // byte[] x = new byte [] {0x44, 0x49, 0x43, 0x4D, 0x02, 0x00}; // "DICM"
@@ -65,21 +69,36 @@ public class DICOMClient {
         }
         return false;
     }
-    public String toString()
-    {
+
+    public String toString() {
         return String.format("DICOMClient{%s:%d, calledAET=%s, callingAET=%s}",
                 this.host, this.port, this.srvAET, this.myAET);
     }
-    public boolean verifyServer()
-    {
+
+    public boolean verifyServer() {
         try {
-            new VerificationSOPClassSCU(this.host,this.port, this.srvAET, this.myAET,false, 0);
-        }
-        catch (Exception e) {
+            new VerificationSOPClassSCU(this.host, this.port, this.srvAET, this.myAET, false, 0);
+        } catch (Exception e) {
             e.printStackTrace(System.err);
             return false;
         }
         return true;
+    }
+
+    class Series {
+        public String patientId;
+        public String studyUID;
+        public String seriesUID;
+        public String modality;
+        public List<String> instanceUID;
+
+        public Series() {
+            this.instanceUID = new ArrayList<>(10);
+        }
+        boolean isNull()
+        {
+            return this.seriesUID == null;
+        }
     }
 
     class Instance {
@@ -94,8 +113,8 @@ public class DICOMClient {
         private String modality;
 
         private boolean isValid = false;
-        public Instance(File fn)
-        {
+
+        public Instance(File fn) {
             file = fn.getAbsolutePath();
             try (DicomInputStream dis = new DicomInputStream(new FileInputStream(fn))) {
                 AttributeList attr = new AttributeList();
@@ -109,7 +128,7 @@ public class DICOMClient {
                 String acqDate = Attribute.getSingleStringValueOrDefault(attr.get(TagFromName.SeriesDate), "19740106");
                 final SimpleDateFormat dateFormat = new SimpleDateFormat("yyyyMMdd");
                 try {
-                    this.acquisitionDate =  dateFormat.parse(acqDate);
+                    this.acquisitionDate = dateFormat.parse(acqDate);
                 } catch (ParseException e) {
                     e.printStackTrace();
                 }
@@ -119,10 +138,8 @@ public class DICOMClient {
                 modality = Attribute.getSingleStringValueOrDefault(attr.get(TagFromName.Modality), "");
 
                 isValid = true;
-            }
-            catch (DicomException de) {
-            }
-            catch (IOException ex) {
+            } catch (DicomException de) {
+            } catch (IOException ex) {
             }
         }
 
@@ -195,8 +212,7 @@ public class DICOMClient {
         }
     }
 
-    public List<Instance> sendDcmFile(Path dir)
-    {
+    public List<Instance> sendDcmFile(Path dir) {
         final Set<String> sentSopInstances = new HashSet<>();
 
         List<Instance> sentInstances = new ArrayList<>();
@@ -215,7 +231,7 @@ public class DICOMClient {
                     .collect(Collectors.toList());
 
             if (instances.isEmpty()) {
-                System.out.println(" Directory "+ dir + " does not contain DCM files?");
+                System.out.println(" Directory " + dir + " does not contain DCM files?");
                 return sentInstances;
             }
 //            instances.forEach(System.out::println);
@@ -231,18 +247,17 @@ public class DICOMClient {
                         sentSopInstances.add(sopInstanceUID);
 
                     }
-                },1);
-            }
-            finally {
+                }, 1);
+            } finally {
                 if (association != null)
                     association.release();
             }
 
             instances.stream()
-                .filter(instance1 -> sentSopInstances.contains(instance1.getInstanceUID()))
-                .forEach(instance -> {
-                    sentInstances.add(instance);
-                });
+                    .filter(instance1 -> sentSopInstances.contains(instance1.getInstanceUID()))
+                    .forEach(instance -> {
+                        sentInstances.add(instance);
+                    });
 
         } catch (IOException e) {
             e.printStackTrace();
@@ -252,6 +267,86 @@ public class DICOMClient {
 
 
         return sentInstances;
+    }
+
+    public CompletableFuture<Series> get_series_async(final String series_uid) {
+        CompletableFuture<Series> fut = new CompletableFuture<>();
+        this.executorService.execute(() -> {
+            try {
+                final Series series = get_series_sync(series_uid);
+                fut.complete(series);
+            } catch (Exception ex) {
+                fut.completeExceptionally(ex);
+            }
+
+        });
+
+        return fut;
+    }
+
+    private Series get_series_sync(final String series_uid) throws IOException, DicomNetworkException, DicomException {
+        SpecificCharacterSet specificCharacterSet = new SpecificCharacterSet((String[]) null);
+        AttributeList identifier = new AttributeList();
+        {
+            AttributeTag t = TagFromName.QueryRetrieveLevel;
+            Attribute a = new CodeStringAttribute(t);
+            a.addValue("IMAGE");
+            identifier.put(t, a);
+        }
+        {
+            AttributeTag t = TagFromName.SeriesInstanceUID;
+            Attribute a = new UniqueIdentifierAttribute(t);
+            a.addValue(series_uid);
+            identifier.put(t, a);
+        }
+        {
+            AttributeTag t = TagFromName.PatientID;
+            Attribute a = new LongStringAttribute(t, specificCharacterSet);
+            a.addValue("");
+            identifier.put(t, a);
+        }
+        {
+            AttributeTag t = TagFromName.SOPInstanceUID;
+            Attribute a = new LongStringAttribute(t, specificCharacterSet);
+            a.addValue("");
+            identifier.put(t, a);
+        }
+        {
+            AttributeTag t = TagFromName.StudyInstanceUID;
+            Attribute a = new UniqueIdentifierAttribute(t);
+            a.addValue("");
+            identifier.put(t, a);
+        }
+        {
+            AttributeTag t = TagFromName.Modality;
+            Attribute a = new UniqueIdentifierAttribute(t);
+            a.addValue("");
+            identifier.put(t, a);
+        }
+        final Series series = new Series();
+        new FindSOPClassSCU(this.host, this.port, this.srvAET, this.myAET,
+                SOPClass.StudyRootQueryRetrieveInformationModelFind,
+                identifier,
+                new IdentifierHandler() {
+                    boolean firstTime = true;
+                    @Override
+                    public void doSomethingWithIdentifier(AttributeList list) throws DicomException {
+                        // System.out.println(list);
+                        if (this.firstTime) {
+                            series.patientId = list.get(TagFromName.PatientID).getSingleStringValueOrEmptyString();
+                            series.seriesUID = list.get(TagFromName.SeriesInstanceUID).getSingleStringValueOrEmptyString();
+                            series.studyUID = list.get(TagFromName.StudyInstanceUID).getSingleStringValueOrEmptyString();
+                            series.modality = list.get(TagFromName.Modality).getSingleStringValueOrEmptyString();
+                            this.firstTime = false;
+                        }
+                        final Attribute attribute = list.get(TagFromName.SOPInstanceUID);
+                        final String instance_uid = attribute.getSingleStringValueOrNull();
+                        if (instance_uid != null)
+                            series.instanceUID.add(instance_uid);
+                    }
+                },
+                1);
+        return series;
     }
 
     private String wadoUrl = "http://localhost:8080/wado";
@@ -281,6 +376,7 @@ public class DICOMClient {
             return STATE.ABORT;
 
         }
+
         @Override
         public STATE onBodyPartReceived(HttpResponseBodyPart bodyPart) throws Exception {
             fos.write(bodyPart.getBodyPartBytes());
@@ -299,14 +395,16 @@ public class DICOMClient {
                 fut.complete(this.path);
             return response;
         }
+
         @Override
         public void onThrowable(Throwable t) {
             t.printStackTrace();
             error = true;
         }
     }
+
     public CompletableFuture<Path> wado_retrieve_instance(final String instanceUID, final Path saveTo,
-                                                                    final boolean downloadJpeg)  {
+                                                          final boolean downloadJpeg) {
         Request r = new RequestBuilder()
                 .setMethod("GET")
                 .setUrl(wadoUrl)
