@@ -1,9 +1,12 @@
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.ning.http.client.*;
 import com.pixelmed.dicom.*;
 import com.pixelmed.display.ConsumerFormatImageMaker;
 import com.pixelmed.network.*;
 
 import java.io.*;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.text.ParseException;
@@ -24,13 +27,19 @@ public class DICOMClient {
 
     AsyncHttpClient httpClient;
 
-    private ExecutorService executorService = Executors.newFixedThreadPool(5);
+    private static final int max_pool_thread_count = 50;
+    private ExecutorService executorService;
 
     DICOMClient(AsyncHttpClient httpClient) {
-        this.httpClient = new AsyncHttpClient(new AsyncHttpClientConfig.Builder()
-                .setAllowPoolingConnections(true)
-                //.setMaxConnectionsPerHost(10)
-                .build());
+        this.httpClient = httpClient;
+        // Use a thread pool executor
+        // The following is similar to Executors.newCachedThreadPool
+        // but with different core and max thread count..
+        this.executorService =
+                new ThreadPoolExecutor(1, max_pool_thread_count,
+                        60L, TimeUnit.SECONDS,
+                        new SynchronousQueue<>(),
+                        new ThreadFactoryBuilder().setNameFormat("dicom-client-pool-%d").build());
     }
 
     public DICOMClient setHost(String host) {
@@ -89,14 +98,17 @@ public class DICOMClient {
         public String patientId;
         public String studyUID;
         public String seriesUID;
+        public String seriesDate;
         public String modality;
         public List<String> instanceUID;
+        public Set<String> sopClassUIDs;
 
         public Series() {
             this.instanceUID = new ArrayList<>(10);
+            this.sopClassUIDs = new HashSet<>(10);
         }
-        boolean isNull()
-        {
+
+        boolean isNull() {
             return this.seriesUID == null;
         }
     }
@@ -255,9 +267,7 @@ public class DICOMClient {
 
             instances.stream()
                     .filter(instance1 -> sentSopInstances.contains(instance1.getInstanceUID()))
-                    .forEach(instance -> {
-                        sentInstances.add(instance);
-                    });
+                    .forEach(sentInstances::add);
 
         } catch (IOException e) {
             e.printStackTrace();
@@ -269,22 +279,21 @@ public class DICOMClient {
         return sentInstances;
     }
 
-    public CompletableFuture<Series> get_series_async(final String series_uid) {
+    public CompletableFuture<Series> find_series_async(final String series_uid) {
         CompletableFuture<Series> fut = new CompletableFuture<>();
         this.executorService.execute(() -> {
             try {
-                final Series series = get_series_sync(series_uid);
+                final Series series = find_series_sync(series_uid);
                 fut.complete(series);
             } catch (Exception ex) {
                 fut.completeExceptionally(ex);
             }
 
         });
-
         return fut;
     }
 
-    private Series get_series_sync(final String series_uid) throws IOException, DicomNetworkException, DicomException {
+    public Series find_series_sync(final String series_uid) throws IOException, DicomNetworkException, DicomException {
         SpecificCharacterSet specificCharacterSet = new SpecificCharacterSet((String[]) null);
         AttributeList identifier = new AttributeList();
         {
@@ -318,7 +327,19 @@ public class DICOMClient {
             identifier.put(t, a);
         }
         {
+            AttributeTag t = TagFromName.SeriesDate;
+            Attribute a = new UniqueIdentifierAttribute(t);
+            a.addValue("");
+            identifier.put(t, a);
+        }
+        {
             AttributeTag t = TagFromName.Modality;
+            Attribute a = new UniqueIdentifierAttribute(t);
+            a.addValue("");
+            identifier.put(t, a);
+        }
+        {
+            AttributeTag t = TagFromName.SOPClassUID;
             Attribute a = new UniqueIdentifierAttribute(t);
             a.addValue("");
             identifier.put(t, a);
@@ -329,12 +350,14 @@ public class DICOMClient {
                 identifier,
                 new IdentifierHandler() {
                     boolean firstTime = true;
+
                     @Override
                     public void doSomethingWithIdentifier(AttributeList list) throws DicomException {
-                        // System.out.println(list);
+                        series.sopClassUIDs.add(Attribute.getSingleStringValueOrEmptyString(list, TagFromName.SOPClassUID));
                         if (this.firstTime) {
                             series.patientId = list.get(TagFromName.PatientID).getSingleStringValueOrEmptyString();
                             series.seriesUID = list.get(TagFromName.SeriesInstanceUID).getSingleStringValueOrEmptyString();
+                            series.seriesDate = list.get(TagFromName.SeriesDate).getSingleStringValueOrEmptyString();
                             series.studyUID = list.get(TagFromName.StudyInstanceUID).getSingleStringValueOrEmptyString();
                             series.modality = list.get(TagFromName.Modality).getSingleStringValueOrEmptyString();
                             this.firstTime = false;
@@ -346,7 +369,67 @@ public class DICOMClient {
                     }
                 },
                 1);
+        System.out.println(String.format("<%s> C-FIND returned %d images\n", Thread.currentThread().getName(), series.instanceUID.size()));
         return series;
+    }
+
+    public CompletableFuture<List<String>> get_series_async(final String series_uid, final File tmpDir) {
+        CompletableFuture<List<String>> fut = new CompletableFuture<>();
+        this.executorService.execute(() -> {
+            try {
+                final List<String> files = get_series_sync(series_uid, tmpDir);
+                fut.complete(files);
+            } catch (Exception ex) {
+                fut.completeExceptionally(ex);
+            }
+        });
+        return fut;
+    }
+
+    public List<String> get_series_sync(final String series_uid, final File tmpDir) {
+        List<String> fileNames = new ArrayList<>(10);
+        try {
+
+            Series series = find_series_sync(series_uid); // to get the SOP Class UIDs
+            if (series.isNull())
+                return fileNames; // Series not exist??
+            AttributeList identifier = new AttributeList();
+            {
+                AttributeTag t = TagFromName.QueryRetrieveLevel;
+                Attribute a = new CodeStringAttribute(t);
+                a.addValue("SERIES");
+                identifier.put(t, a);
+            }
+            {
+                AttributeTag t = TagFromName.SeriesInstanceUID;
+                Attribute a = new UniqueIdentifierAttribute(t);
+                a.addValue(series_uid);
+                identifier.put(t, a);
+            }
+            new GetSOPClassSCU(this.host, this.port, this.srvAET, this.myAET,
+                    SOPClass.StudyRootQueryRetrieveInformationModelGet,
+                    identifier,
+                    new IdentifierHandler(),
+                    tmpDir,
+                    StoredFilePathStrategy.BYSOPINSTANCEUIDINSINGLEFOLDER,
+                    new ReceivedObjectHandler() {
+                        @Override
+                        public void sendReceivedObjectIndication(String dicomFileName,String transferSyntax,String callingAETitle)
+                                throws DicomNetworkException, DicomException, IOException {
+                            System.err.println("Received: "+dicomFileName+" from "+callingAETitle+" in "+transferSyntax);
+                            fileNames.add(dicomFileName);
+                        }
+                    },
+                    series.sopClassUIDs,
+                    false, // theirChoice
+                    true, // ourChoice
+                    true, // asEncoded
+                    1);
+        } catch (Exception e) {
+            e.printStackTrace(System.err);
+        }
+        System.out.println(String.format("<%s> C-GET saved %d images\n", Thread.currentThread().getName(), fileNames.size()));
+        return fileNames;
     }
 
     private String wadoUrl = "http://localhost:8080/wado";
@@ -355,7 +438,15 @@ public class DICOMClient {
         this.wadoUrl = wadoUrl;
     }
 
-    public class FileSaveHandler extends AsyncCompletionHandlerBase {
+    public URI getWadoUrl() {
+        try {
+            return new URI(this.wadoUrl + "?requestType=WADO");
+        } catch (URISyntaxException e) {
+            return null;
+        }
+    }
+
+    static class FileSaveHandler extends AsyncCompletionHandlerBase {
 
         private Path path;
         private FileOutputStream fos;
@@ -403,6 +494,16 @@ public class DICOMClient {
         }
     }
 
+    public static String build_wado_request_query(final String instanceUID) {
+        return build_wado_request_query(instanceUID, 200, 80);
+    }
+
+    public static String build_wado_request_query(final String instanceUID, int size, int quality) {
+        // See ftp://medical.nema.org/medical/dicom/final/sup85_ft.pdf
+        return String.format("requestType=WADO&studyUID=&seriesUID=&objectUID=%s&rows=%d&imageQuality=%d&contentType=image/jpeg",
+                instanceUID, size, quality);
+    }
+
     public CompletableFuture<Path> wado_retrieve_instance(final String instanceUID, final Path saveTo,
                                                           final boolean downloadJpeg) {
         Request r = new RequestBuilder()
@@ -417,8 +518,7 @@ public class DICOMClient {
         // System.out.println("-->" + r.getUri());
         CompletableFuture<Path> fut = new CompletableFuture<>();
         try {
-            final FileSaveHandler handler;
-            handler = new FileSaveHandler(saveTo, fut);
+            final FileSaveHandler handler = new FileSaveHandler(saveTo, fut);
             this.httpClient.executeRequest(r, handler);
         } catch (FileNotFoundException e) {
             e.printStackTrace();

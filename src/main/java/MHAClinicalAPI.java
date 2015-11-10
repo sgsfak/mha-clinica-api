@@ -7,11 +7,14 @@ import com.google.common.net.HttpHeaders;
 import com.ning.http.client.AsyncHttpClient;
 import com.ning.http.client.AsyncHttpClientConfig;
 import com.opencsv.CSVReader;
+import io.undertow.Handlers;
 import io.undertow.Undertow;
 import io.undertow.io.DefaultIoCallback;
 import io.undertow.io.IoCallback;
 import io.undertow.io.Sender;
+import io.undertow.server.HttpHandler;
 import io.undertow.server.HttpServerExchange;
+import io.undertow.server.handlers.proxy.SimpleProxyClientProvider;
 import io.undertow.util.Headers;
 import io.undertow.util.HttpString;
 import io.undertow.util.SameThreadExecutor;
@@ -20,7 +23,6 @@ import net.minidev.json.JSONArray;
 import net.minidev.json.JSONObject;
 
 import java.io.*;
-import java.net.URLEncoder;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
@@ -51,39 +53,9 @@ public class MHAClinicalAPI {
 
     static DICOMClient dicomClient;
 
-    public static void get_dcm_image(final String user, final String series_id, HttpServerExchange exchange) {
-
-        CassandraClient.DB.executeAsync("select icon_jpg from dcm_images where mha_uid=? and series_uid=? limit 1", user, series_id)
-                .thenAcceptAsync(rows -> {
-                    final Row one = rows.one();
-                    if (one == null) {
-                        exchange.setStatusCode(404);
-                        exchange.endExchange();
-                        return;
-                    }
-                    final ByteBuffer iconJpg = one.getBytes("icon_jpg");
-
-                    exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "image/jpeg");
-                    exchange.getResponseHeaders().put(Headers.CACHE_CONTROL, "max-age=86400");
-                    exchange.getResponseSender().send(iconJpg);
-                    exchange.endExchange();
-                });
-    }
-
-    private static <T> CompletableFuture<List<T>> sequence(List<CompletableFuture<T>> futures) {
-        CompletableFuture<Void> allDoneFuture =
-                CompletableFuture.allOf(futures.toArray(new CompletableFuture[futures.size()]));
-        return allDoneFuture.thenApply(v ->
-                        futures.stream().
-                                map(CompletableFuture::join).
-                                collect(Collectors.<T>toList()));
-    }
-
-
-    public static void get_dcm_series(final DICOMClient dcmClient, final String series_id, HttpServerExchange exchange) {
-
-        dcmClient.get_series_async(series_id)
-                .thenAcceptAsync(series->{
+    public static void get_dcm_image(final DICOMClient dcmClient, final String series_id, HttpServerExchange exchange) {
+        dcmClient.find_series_async(series_id)
+                .thenAccept(series -> {
                     if (series.isNull()) {
                         exchange.setStatusCode(StatusCodes.NOT_FOUND);
                         exchange.getResponseSender().send(String.format("Series <%s> does not contain any instances!\n", series_id));
@@ -92,55 +64,104 @@ public class MHAClinicalAPI {
                     }
 
                     List<String> instanceUids = series.instanceUID;
-
+                    // Select the image in the "middle" of the series:
+                    final String selectInstanceUID = instanceUids.get(instanceUids.size() / 2);
                     try {
-                        System.out.println(Thread.currentThread().getName() + " Got instanceUids");
-                        final Path tempDirectory = Files.createTempDirectory("mha-series-");
-                        final Path tempFile = Paths.get(System.getProperty("java.io.tmpdir"), "mha-" + UUID.randomUUID().toString() + ".zip");
-                        final List<CompletableFuture<Path>> futures = instanceUids.stream()
-                                .map(uid -> dicomClient.wado_retrieve_instance(uid, tempDirectory.resolve(uid), false))
-                                .collect(toList());
-                        sequence(futures).thenAcceptAsync(paths -> {
-                            //System.out.println(Thread.currentThread().getName() + "Check temp dir " + tempDirectory + " zip " + tempFile);
-
-                            try {
-                                ZipUtils.zipDir(tempDirectory, tempFile);
-                                //System.out.println(Thread.currentThread().getName() + " Check zip file " + tempFile);
-
-                                exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "application/zip");
-                                exchange.getResponseHeaders().put(Headers.CONTENT_LENGTH, tempFile.toFile().length());
-                                exchange.getResponseHeaders().put(HttpString.tryFromString("Content-Disposition"),
-                                        String.format("attachment; filename=series-%s.zip", series_id));
-                                exchange.getResponseSender().transferFrom(FileChannel.open(tempFile), new DefaultIoCallback() {
-                                    @Override
-                                    public void onComplete(HttpServerExchange httpServerExchange, Sender sender) {
-                                        safelyDeleteFileOrDir(tempDirectory);
-                                        safelyDeleteFileOrDir(tempFile);
-                                        super.onComplete(exchange, sender);
-                                    }
-                                    @Override
-                                    public void onException(final HttpServerExchange exchange, final Sender sender, final IOException exception) {
-                                        safelyDeleteFileOrDir(tempDirectory);
-                                        safelyDeleteFileOrDir(tempFile);
-                                        super.onException(exchange, sender, exception);
+                        final Path tempFile = Files.createTempFile("dcm-image", "jpg");
+                        dicomClient.wado_retrieve_instance(selectInstanceUID, tempFile, true)
+                                .handleAsync((path, ex) -> {
+                                    try {
+                                        final byte[] b = Files.readAllBytes(path);
+                                        exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "image/jpeg");
+                                        exchange.getResponseHeaders().put(Headers.CACHE_CONTROL, "max-age=86400");
+                                        exchange.getResponseSender().send(ByteBuffer.wrap(b));
+                                    } catch (IOException e) {
+                                        e.printStackTrace();
+                                        exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
+                                    } finally {
+                                        safelyDeleteFileOrDir(path);
+                                        exchange.endExchange();
                                     }
 
+                                    return null;
                                 });
-                            } catch (Exception e) {
-                                e.printStackTrace();
-                                exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
-                                exchange.endExchange();
-                            }
-                        });
                     } catch (IOException e) {
                         e.printStackTrace();
                         exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
                         exchange.endExchange();
                     }
-
                 });
+    }
+
+    private static <T> CompletableFuture<List<T>> sequence(List<CompletableFuture<T>> futures) {
+        CompletableFuture<Void> allDoneFuture =
+                CompletableFuture.allOf(futures.toArray(new CompletableFuture[futures.size()]));
+        return allDoneFuture.thenApply(v ->
+                futures.stream().
+                        map(CompletableFuture::join).
+                        collect(Collectors.<T>toList()));
+    }
+
+
+    public static void get_dcm_series(final DICOMClient dcmClient, final String series_id, HttpServerExchange exchange) {
+
+        try {
+            final Path tempDirectory = Files.createTempDirectory("mha-series-");
+            dcmClient.get_series_async(series_id, tempDirectory.toFile())
+                    .thenAcceptAsync(fileNames -> {
+                        if (fileNames.isEmpty()) {
+                            exchange.setStatusCode(StatusCodes.NOT_FOUND);
+                            exchange.getResponseSender().send(String.format("Series <%s> does not contain any instances!\n", series_id));
+                            exchange.endExchange();
+                            try {
+                                Files.delete(tempDirectory);
+                            } catch (IOException e) {
+                            }
+                            return;
+                        }
+
+                        System.out.printf("<%s> Got %d instanceUids\n", Thread.currentThread().getName(), fileNames.size());
+
+                        try {
+                            final Path tempFile = Paths.get(System.getProperty("java.io.tmpdir"), "mha-" + UUID.randomUUID().toString() + ".zip");
+                            ZipUtils.zipDir(tempDirectory, tempFile);
+                            //System.out.println(Thread.currentThread().getName() + " Check zip file " + tempFile);
+
+                            exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "application/zip");
+                            exchange.getResponseHeaders().put(Headers.CONTENT_LENGTH, tempFile.toFile().length());
+                            exchange.getResponseHeaders().put(HttpString.tryFromString("Content-Disposition"),
+                                    String.format("attachment; filename=series-%s.zip", series_id));
+                            exchange.getResponseSender().transferFrom(FileChannel.open(tempFile), new DefaultIoCallback() {
+                                @Override
+                                public void onComplete(HttpServerExchange httpServerExchange, Sender sender) {
+                                    safelyDeleteFileOrDir(tempDirectory);
+                                    safelyDeleteFileOrDir(tempFile);
+                                    super.onComplete(exchange, sender);
+                                }
+
+                                @Override
+                                public void onException(final HttpServerExchange exchange, final Sender sender, final IOException exception) {
+                                    safelyDeleteFileOrDir(tempDirectory);
+                                    safelyDeleteFileOrDir(tempFile);
+                                    super.onException(exchange, sender, exception);
+                                }
+
+                            });
+                        } catch (Exception e) {
+                            e.printStackTrace();
+                            exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
+                            exchange.endExchange();
+                        }
+                    });
+
+        } catch (IOException e) {
+            e.printStackTrace();
+            exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
+            exchange.endExchange();
+        }
 
     }
+
 
     private static void safelyDeleteFileOrDir(Path path) {
         try (Stream<Path> pathStream = Files.walk(path)) {
@@ -275,11 +296,9 @@ public class MHAClinicalAPI {
                                         final List<String> instance_uids = row.getList("instance_uids", String.class);
                                         img.put("instance_uids", instance_uids);
                                         img.put("count", instance_uids.size());
-                                        try {
-                                            img.put("icon", String.format("%s/dcm.jpg?u=%s&id=%s", baseURI, URLEncoder.encode(user, "UTF-8"), series_uid));
-                                            img.put("uri", String.format("%s/dcm?u=%s&id=%s", baseURI, URLEncoder.encode(user, "UTF-8"), series_uid));
-                                        } catch (UnsupportedEncodingException e) {
-                                        }
+                                        final String selectInstance = instance_uids.get(instance_uids.size() / 2);
+                                        img.put("icon", String.format("%s/wado?instance_uid=%s", baseURI, selectInstance));
+                                        img.put("uri", String.format("%s/dcm?series_uid=%s", baseURI, series_uid));
                                         return img;
                                     })
                                     .collect(toList());
@@ -388,11 +407,11 @@ public class MHAClinicalAPI {
         });
     }
 
-    private static void quickly_dispatch(final HttpServerExchange exchange, Runnable func)
-    {
+    private static void quickly_dispatch(final HttpServerExchange exchange, Runnable func) {
         exchange.dispatch(exchange.isInIoThread() ? SameThreadExecutor.INSTANCE : exchange.getIoThread(),
                 func);
     }
+
     public static void main(String... args) {
 
 
@@ -406,7 +425,7 @@ public class MHAClinicalAPI {
         AsyncHttpClient asyncHttpClient = new AsyncHttpClient(new AsyncHttpClientConfig.Builder()
                 .setAllowPoolingConnections(true)
                 .setExecutorService(Executors.newCachedThreadPool())
-               // .setMaxConnectionsPerHost(100)
+                // .setMaxConnectionsPerHost(100)
                 .build());
         //System.err.println("Configuration:\n"+config);
 
@@ -422,6 +441,8 @@ public class MHAClinicalAPI {
             return;
         }
 
+//        dicomClient.get_series_async("1.3.6.1.4.1.19291.2.1.2.3427837366291351879037691429496729553844", new File("/tmp/osirix_v2"));
+
         CassandraClient.DB.connect(config.getCassandraKeyspace(), config.getCassandraUser(), config.getCassandraPwd(), config.getCassandraHost());
         final SPARQLClient sc = new SPARQLClient(asyncHttpClient);
         // String activities_query = readQueryFromFile("Activities.sparql");
@@ -435,6 +456,7 @@ public class MHAClinicalAPI {
         final String tempUploadDir = config.getTempUploadDir().endsWith(File.separator) ? config.getTempUploadDir() : config.getTempUploadDir() + File.separator;
         final String tempStoreDir = tempUploadDir + File.separator + "_store";
 
+        final HttpHandler wadoProxyHandler = Handlers.proxyHandler(new SimpleProxyClientProvider(dicomClient.getWadoUrl()));
         Undertow server = Undertow.builder()
                 .addHttpListener(port, "0.0.0.0")
                 .setHandler(routing()
@@ -446,43 +468,46 @@ public class MHAClinicalAPI {
                                 return;
                             }
                             final String user = queryParameters.get("u").getFirst();
-                            quickly_dispatch(exchange,() -> ask_cassandra(user, baseURI, exchange));
+                            quickly_dispatch(exchange, () -> ask_cassandra(user, baseURI, exchange));
                         })
 
                         .get("/dcm.jpg", exchange -> {
                             final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
-                            if (!queryParameters.containsKey("u")) {
-                                exchange.setStatusCode(StatusCodes.NOT_FOUND);
-                                exchange.getResponseSender().send("You must specify the 'user' in the 'u' query parameter");
-                                return;
-                            } else if (!queryParameters.containsKey("id")) {
+                            if (!queryParameters.containsKey("id")) {
                                 exchange.setStatusCode(StatusCodes.NOT_FOUND);
                                 exchange.getResponseSender().send("You must specify the 'id' query parameter");
                                 return;
                             }
-                            final String user = queryParameters.get("u").getFirst();
                             final String id = queryParameters.get("id").getFirst();
-                            quickly_dispatch(exchange, () -> get_dcm_image(user, id, exchange));
+                            quickly_dispatch(exchange, () -> get_dcm_image(dicomClient, id, exchange));
 
                         })
 
                         .get("/dcm", exchange -> { // Retrieve a whole series
                             final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
-                            if (!queryParameters.containsKey("u")) {
+                            if (!queryParameters.containsKey("series_uid")) {
                                 exchange.setStatusCode(StatusCodes.NOT_FOUND);
-                                exchange.getResponseSender().send("You must specify the 'user' in the 'u' query parameter");
-                                return;
-                            } else if (!queryParameters.containsKey("id")) {
-                                exchange.setStatusCode(StatusCodes.NOT_FOUND);
-                                exchange.getResponseSender().send("You must specify the 'id' query parameter");
+                                exchange.getResponseSender().send("You must specify the 'series_uid' query parameter");
                                 return;
                             }
-                            final String user = queryParameters.get("u").getFirst();
-                            final String seriesUid = queryParameters.get("id").getFirst();
+                            final String seriesUid = queryParameters.get("series_uid").getFirst();
                             quickly_dispatch(exchange, () -> get_dcm_series(dicomClient, seriesUid, exchange));
 
                         })
 
+                        .get("/wado",
+                                exchange -> {
+                                    final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
+                                    if (!queryParameters.containsKey("instance_uid")) {
+                                        exchange.setStatusCode(StatusCodes.NOT_FOUND);
+                                        exchange.getResponseSender().send("You must specify the 'instance_uid' query parameter");
+                                        return;
+                                    }
+                                    exchange.setQueryString(DICOMClient.build_wado_request_query(queryParameters.get("instance_uid").getFirst()));
+                                    exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "image/jpeg");
+                                    exchange.getResponseHeaders().put(Headers.CACHE_CONTROL, "max-age=86400");
+                                    wadoProxyHandler.handleRequest(exchange);
+                                })
                         .get("/series", exchange -> {
                             final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
                             if (!queryParameters.containsKey("id")) {
@@ -491,10 +516,17 @@ public class MHAClinicalAPI {
                                 return;
                             }
                             final String seriesUid = queryParameters.get("id").getFirst();
-                            quickly_dispatch(exchange, ()-> {
-                                dicomClient.get_series_async(seriesUid)
-                                        .thenAcceptAsync(series->{
-                                            System.out.println("Series "+ series.seriesUID + " pat id " + series.patientId + " study: " +series.studyUID + " Modality "+series.modality);
+                            if ("".equals(seriesUid)) {
+                                exchange.setStatusCode(StatusCodes.NOT_FOUND);
+                                exchange.getResponseSender().send("You must specify a non-empty value for the 'id' query parameter");
+                                return;
+                            }
+                            quickly_dispatch(exchange, () -> {
+                                dicomClient.find_series_async(seriesUid)
+                                        .thenAccept(series -> {
+                                            System.out.println(String.format("<%s> Series %s, pat_id=%s, study=%s, modality=%s\n",
+                                                    Thread.currentThread().getName(),
+                                                    series.seriesUID, series.patientId, series.studyUID, series.modality));
                                             if (series.isNull()) {
                                                 exchange.setStatusCode(StatusCodes.NOT_FOUND);
                                                 exchange.getResponseSender().send(String.format("Series <%s> does not contain any instances!\n", seriesUid));
@@ -506,7 +538,15 @@ public class MHAClinicalAPI {
                                             js.put("series_uid", series.seriesUID);
                                             js.put("patient_uid", series.patientId);
                                             js.put("study_uid", series.studyUID);
-                                            js.put("instance_uids", series.instanceUID);
+                                            js.put("series_date", series.seriesDate);
+                                            js.put("instance_uids", series.instanceUID.stream()
+                                                    .map(instance_uid -> {
+                                                        JSONObject jsi = new JSONObject();
+                                                        jsi.put("instance_uid", instance_uid);
+                                                        jsi.put("href", baseURI + "/wado?instance_uid=" + instance_uid);
+                                                        return jsi;
+                                                    })
+                                                    .collect(toList()));
 
                                             exchange.setStatusCode(StatusCodes.OK);
                                             exchange.getResponseHeaders().put(new HttpString(HttpHeaders.CONTENT_TYPE), "application/json");
