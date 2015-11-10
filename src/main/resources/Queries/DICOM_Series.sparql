@@ -1,0 +1,41 @@
+PREFIX : <http://www.semanticweb.org/kondylak/ontologies/2013/1/untitled-ontology-86#>
+PREFIX obo: <http://purl.obolibrary.org/obo/>
+PREFIX ro: <http://www.obofoundry.org/ro/ro.owl#>
+PREFIX transmed: <http://www.w3.org/2001/sw/hcls/ns/transmed/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX acgt:<http://www.ifomis.org/acgt/1.0#>
+PREFIX snomedct:<http://purl.bioontology.org/ontology/SNOMEDCT/>
+
+SELECT DISTINCT ?modality ?study_description ?when ?series_uid
+{
+#patient has name
+	?patient transmed:has_identifier ?identifier.
+
+#identifier has value
+        ?identifier transmed:TMO_0185 ?mha_uid.
+
+		
+#patient has encounter
+	?patient ro:participates_in ?encounter.
+
+
+#encounter has_date
+	?encounter transmed:has_date ?when.
+
+	
+#diagnosis has title
+	?encounter transmed:has_title ?study_description.
+
+#diagnosis has modality
+	?encounter transmed:tags ?modality.
+
+#diagnosis has series
+	?encounter acgt:reveals ?seriesv.
+
+#series has value
+	?seriesv transmed:TMO_0185 ?series_uid.
+
+FILTER (?mha_uid = "{USER}").
+}

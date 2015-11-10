@@ -1,0 +1,49 @@
+PREFIX : <http://www.semanticweb.org/kondylak/ontologies/2013/1/untitled-ontology-86#>
+PREFIX obo: <http://purl.obolibrary.org/obo/>
+PREFIX ro: <http://www.obofoundry.org/ro/ro.owl#>
+PREFIX transmed: <http://www.w3.org/2001/sw/hcls/ns/transmed/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX acgt:<http://www.ifomis.org/acgt/1.0#>
+PREFIX snomedct:<http://purl.bioontology.org/ontology/SNOMEDCT/>
+
+SELECT DISTINCT ?mha_uid ?loinc_code ?inserted_date   ?title  ?value ?units
+WHERE {
+
+#patient has name
+	?patient transmed:has_identifier ?identifier.
+
+#identifier has value
+        ?identifier transmed:TMO_0185 ?mha_uid.
+
+#patient has encounter
+	?patient ro:participates_in ?encounter.
+
+
+#encounter reveals phenotype
+	?encounter acgt:reveals ?phenotype.
+
+#phenotype has loinc_code
+        ?phenotype transmed:has_identifier ?loinc_code. 
+
+#phenotype  has date
+	?phenotype transmed:has_date ?inserted_date .
+
+#phenotype  has title
+	?phenotype transmed:has_title ?title.
+
+#phenotype  has value
+	?phenotype transmed:TMO_0185 ?value.
+
+
+#phenotype  has units of measurement
+	?phenotype transmed:TMO_0196 ?units_of_measurement.
+
+#unit of measuremenr isa unit of measurement	
+	?units_of_measurement a transmed:TMO_0104.
+	
+#units of measurement have value
+	?units_of_measurement transmed:TMO_0185 ?units.
+
+}

@@ -1,32 +1,38 @@
 import com.ning.http.client.*;
+import com.opencsv.CSVReader;
+import net.minidev.json.JSONObject;
 
+import java.io.IOException;
+import java.io.StringReader;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
+
+import static java.util.stream.Collectors.toList;
 
 /**
  * Created by ssfak on 28/9/15.
  */
 public class SPARQLClient {
 
-    private static final String server = "http://139.91.210.41:8890/sparql/";
-    private static final String default_graph_uri ="http://localhost:8890/MHA";
+    private static String sparqlURL;
+    private static final String default_graph_uri = "http://localhost:8890/MHA";
 
     private AsyncHttpClient asyncHttpClient;
 
-    SPARQLClient(AsyncHttpClient asyncHttpClient)
-    {
+    SPARQLClient(AsyncHttpClient asyncHttpClient, final String sparqlURL) {
         this.asyncHttpClient = asyncHttpClient;
+        this.sparqlURL = sparqlURL;
 
     }
-    CompletableFuture<String> send_query(final String query)
-    {
+
+    CompletableFuture<String> send_query(final String query) {
         final CompletableFuture<String> fut = new CompletableFuture<>();
         Map<String, List<String>> params = new HashMap<>();
         params.put("query", Arrays.asList(query));
         params.put("default-graph-uri", Arrays.asList(default_graph_uri));
 
-        Request r = new RequestBuilder().setUrl(server)
+        Request r = new RequestBuilder().setUrl(sparqlURL)
                 .setMethod("POST")
                 .setFormParams(params)
                 .setHeader("Accept", "text/csv")
@@ -49,5 +55,26 @@ public class SPARQLClient {
             }
         });
         return fut;
+    }
+
+    CompletableFuture<List<Map<String, String>>> send_query_and_parse(final String query) {
+        return this.send_query(query)
+                .thenApply(csv -> {
+                    CSVReader reader = new CSVReader(new StringReader(csv));
+                    try {
+                        String[] colNames = reader.readNext();
+                        List<Map<String, String>> records =
+                                reader.readAll().stream().map(cols -> {
+                                    Map<String, String> obj = new HashMap<>();
+                                    for (int i = 0; i < cols.length; i++) {
+                                        obj.put(colNames[i], cols[i]);
+                                    }
+                                    return obj;
+                                }).collect(toList());
+                        return records;
+                    } catch (Throwable ex) {
+                        throw new RuntimeException(ex.getMessage());
+                    }
+                });
     }
 }

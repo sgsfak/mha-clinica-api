@@ -1,0 +1,47 @@
+PREFIX : <http://www.semanticweb.org/kondylak/ontologies/2013/1/untitled-ontology-86#>
+PREFIX obo: <http://purl.obolibrary.org/obo/>
+PREFIX ro: <http://www.obofoundry.org/ro/ro.owl#>
+PREFIX transmed: <http://www.w3.org/2001/sw/hcls/ns/transmed/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX acgt:<http://www.ifomis.org/acgt/1.0#>
+PREFIX snomedct:<http://purl.bioontology.org/ontology/SNOMEDCT/>
+
+SELECT distinct ?title    ?atc_code  ?end_date ?start_date ?dose ?dose_unit 
+{
+#patient has name
+		?patient transmed:has_identifier ?identifier.
+
+#identifier has value
+                                    ?identifier transmed:TMO_0185 "{USER}".
+
+#drug prescribed to patient
+		?drug transmed:prescribedTo ?patient.
+
+#drug has_title		
+		?drug transmed:has_title ?title . 
+
+
+#drug has atc code			
+		?drug transmed:has_atc_code ?atc_code . 
+		
+#drug starts
+		?drug ro:starts ?start_date . 
+		
+#drug ends
+		?drug ro:ends ?end_date .
+ 
+#drug has dose
+                ?drug transmed:TMO_0196 ?dosev .
+
+
+#dose has unit
+                ?dosev transmed:TMO_0185 ?dose.
+
+#dose has unit
+                ?dosev transmed:TMO_0186 ?unitc.
+
+#dose has unit
+                ?unitc transmed:TMO_0185  ?dose_unit.
+}

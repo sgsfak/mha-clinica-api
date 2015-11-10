@@ -27,7 +27,7 @@ public class DICOMClient {
 
     AsyncHttpClient httpClient;
 
-    private static final int max_pool_thread_count = 50;
+    private static final int max_pool_thread_count = 100;
     private ExecutorService executorService;
 
     DICOMClient(AsyncHttpClient httpClient) {
@@ -97,8 +97,9 @@ public class DICOMClient {
     class Series {
         public String patientId;
         public String studyUID;
+        public String studyDescription;
         public String seriesUID;
-        public String seriesDate;
+        public Date seriesDate;
         public String modality;
         public List<String> instanceUID;
         public Set<String> sopClassUIDs;
@@ -285,7 +286,9 @@ public class DICOMClient {
             try {
                 final Series series = find_series_sync(series_uid);
                 fut.complete(series);
-            } catch (Exception ex) {
+            } catch (Throwable ex) {
+                ex.printStackTrace(System.err);
+                System.out.printf("<%s> EXC %s\n", Thread.currentThread().getName(), ex.getMessage());
                 fut.completeExceptionally(ex);
             }
 
@@ -327,6 +330,12 @@ public class DICOMClient {
             identifier.put(t, a);
         }
         {
+            AttributeTag t = TagFromName.StudyDescription;
+            Attribute a = new UniqueIdentifierAttribute(t);
+            a.addValue("");
+            identifier.put(t, a);
+        }
+        {
             AttributeTag t = TagFromName.SeriesDate;
             Attribute a = new UniqueIdentifierAttribute(t);
             a.addValue("");
@@ -357,7 +366,14 @@ public class DICOMClient {
                         if (this.firstTime) {
                             series.patientId = list.get(TagFromName.PatientID).getSingleStringValueOrEmptyString();
                             series.seriesUID = list.get(TagFromName.SeriesInstanceUID).getSingleStringValueOrEmptyString();
-                            series.seriesDate = list.get(TagFromName.SeriesDate).getSingleStringValueOrEmptyString();
+                            series.studyDescription = list.get(TagFromName.StudyDescription).getSingleStringValueOrEmptyString();
+                            final String date = list.get(TagFromName.SeriesDate).getSingleStringValueOrEmptyString();
+                            final SimpleDateFormat dateFormat = new SimpleDateFormat("yyyyMMdd");
+                            try {
+                                series.seriesDate = dateFormat.parse(date);
+                            } catch (ParseException e) {
+                                e.printStackTrace();
+                            }
                             series.studyUID = list.get(TagFromName.StudyInstanceUID).getSingleStringValueOrEmptyString();
                             series.modality = list.get(TagFromName.Modality).getSingleStringValueOrEmptyString();
                             this.firstTime = false;
@@ -369,7 +385,7 @@ public class DICOMClient {
                     }
                 },
                 1);
-        System.out.println(String.format("<%s> C-FIND returned %d images\n", Thread.currentThread().getName(), series.instanceUID.size()));
+        System.out.printf("<%s> C-FIND returned %d images\n", Thread.currentThread().getName(), series.instanceUID.size());
         return series;
     }
 
@@ -428,7 +444,7 @@ public class DICOMClient {
         } catch (Exception e) {
             e.printStackTrace(System.err);
         }
-        System.out.println(String.format("<%s> C-GET saved %d images\n", Thread.currentThread().getName(), fileNames.size()));
+        System.out.printf("<%s> C-GET saved %d images\n", Thread.currentThread().getName(), fileNames.size());
         return fileNames;
     }
 

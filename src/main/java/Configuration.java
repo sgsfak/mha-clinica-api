@@ -25,6 +25,8 @@ public class Configuration {
     private int dicomPort;
     private String wadoUrl;
 
+    private String sparqlURL;
+
     private Configuration() {}
 
     static Optional<String> whatsMyIP() {
@@ -60,6 +62,7 @@ public class Configuration {
             config.dicomPort = Optional.of(config.properties.getProperty("DICOM_SERVER_PORT")).map(Integer::parseInt).orElse(11112);
             config.wadoUrl = config.properties.getProperty("DICOM_WADO_URL");
 
+            config.sparqlURL = config.properties.getProperty("SPARQL_URL");
 
             String my_host = config.properties.getProperty("MY_HOST");
             if (my_host == null)
@@ -88,6 +91,7 @@ public class Configuration {
         return cassandraKeyspace;
     }
 
+    public String getSparqlURL() { return sparqlURL;}
 
     public String getCassandraHost() {
         return cassandraHost;

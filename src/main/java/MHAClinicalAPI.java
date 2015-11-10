@@ -6,11 +6,9 @@ import com.datastax.driver.core.Row;
 import com.google.common.net.HttpHeaders;
 import com.ning.http.client.AsyncHttpClient;
 import com.ning.http.client.AsyncHttpClientConfig;
-import com.opencsv.CSVReader;
 import io.undertow.Handlers;
 import io.undertow.Undertow;
 import io.undertow.io.DefaultIoCallback;
-import io.undertow.io.IoCallback;
 import io.undertow.io.Sender;
 import io.undertow.server.HttpHandler;
 import io.undertow.server.HttpServerExchange;
@@ -52,46 +50,7 @@ public class MHAClinicalAPI {
 
 
     static DICOMClient dicomClient;
-
-    public static void get_dcm_image(final DICOMClient dcmClient, final String series_id, HttpServerExchange exchange) {
-        dcmClient.find_series_async(series_id)
-                .thenAccept(series -> {
-                    if (series.isNull()) {
-                        exchange.setStatusCode(StatusCodes.NOT_FOUND);
-                        exchange.getResponseSender().send(String.format("Series <%s> does not contain any instances!\n", series_id));
-                        exchange.endExchange();
-                        return;
-                    }
-
-                    List<String> instanceUids = series.instanceUID;
-                    // Select the image in the "middle" of the series:
-                    final String selectInstanceUID = instanceUids.get(instanceUids.size() / 2);
-                    try {
-                        final Path tempFile = Files.createTempFile("dcm-image", "jpg");
-                        dicomClient.wado_retrieve_instance(selectInstanceUID, tempFile, true)
-                                .handleAsync((path, ex) -> {
-                                    try {
-                                        final byte[] b = Files.readAllBytes(path);
-                                        exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "image/jpeg");
-                                        exchange.getResponseHeaders().put(Headers.CACHE_CONTROL, "max-age=86400");
-                                        exchange.getResponseSender().send(ByteBuffer.wrap(b));
-                                    } catch (IOException e) {
-                                        e.printStackTrace();
-                                        exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
-                                    } finally {
-                                        safelyDeleteFileOrDir(path);
-                                        exchange.endExchange();
-                                    }
-
-                                    return null;
-                                });
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                        exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
-                        exchange.endExchange();
-                    }
-                });
-    }
+    static SPARQLClient sparqlClient;
 
     private static <T> CompletableFuture<List<T>> sequence(List<CompletableFuture<T>> futures) {
         CompletableFuture<Void> allDoneFuture =
@@ -110,17 +69,14 @@ public class MHAClinicalAPI {
             dcmClient.get_series_async(series_id, tempDirectory.toFile())
                     .thenAcceptAsync(fileNames -> {
                         if (fileNames.isEmpty()) {
+                            safelyDeleteFileOrDir(tempDirectory);
                             exchange.setStatusCode(StatusCodes.NOT_FOUND);
                             exchange.getResponseSender().send(String.format("Series <%s> does not contain any instances!\n", series_id));
                             exchange.endExchange();
-                            try {
-                                Files.delete(tempDirectory);
-                            } catch (IOException e) {
-                            }
                             return;
                         }
 
-                        System.out.printf("<%s> Got %d instanceUids\n", Thread.currentThread().getName(), fileNames.size());
+                        System.out.printf("<%s> Got %d instances\n", Thread.currentThread().getName(), fileNames.size());
 
                         try {
                             final Path tempFile = Paths.get(System.getProperty("java.io.tmpdir"), "mha-" + UUID.randomUUID().toString() + ".zip");
@@ -179,6 +135,7 @@ public class MHAClinicalAPI {
         }
     }
 
+    @Deprecated
     public static void ask_cassandra(final String user, final String baseURI, HttpServerExchange exchange) {
 
         Map<String, Deque<String>> params = exchange.getQueryParameters();
@@ -375,36 +332,156 @@ public class MHAClinicalAPI {
                 });
     }
 
-    public static void ask_triplestore(SPARQLClient sc, final String user, final String query, HttpServerExchange exchange) {
-        String q = query.replace("{USER}", user);
-        CompletableFuture<String> f = sc.send_query(q);
-        f.thenAcceptAsync(csv -> {
-            // System.out.println("Success returned (IO thread? " + exchange.isInIoThread() + ") at thread " + Thread.currentThread().getId() + "\n");
-            CSVReader reader = new CSVReader(new StringReader(csv));
-            try {
-                String[] colNames = reader.readNext();
-                List<JSONObject> results = reader.readAll().stream().map(cols -> {
-                    JSONObject obj = new JSONObject();
-                    for (int i = 0; i < cols.length; i++) {
-                        obj.put(colNames[i], cols[i]);
-                    }
-                    return obj;
-                }).collect(toList());
-                JSONObject resOnj = new JSONObject();
-                resOnj.put("results", results);
-                exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "application/json");
-                exchange.getResponseSender().send(resOnj.toJSONString(), IoCallback.END_EXCHANGE);
-            } catch (IOException ex) {
-                exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
-                exchange.getResponseSender().send(ex.getMessage(), IoCallback.END_EXCHANGE);
+    public static void ask_triplestore(SPARQLClient sc, DICOMClient dc, final String user,
+                                       final String imagesQuery,
+                                       final String drugsQuery,
+                                       final String vitalSignsQuery,
+                                       final String problemsQuery,
+                                       final String baseURI, HttpServerExchange exchange) {
 
-            }
-        }).exceptionally(ex -> {
-            System.out.println("exceptionally returned (IO thread? " + exchange.isInIoThread() + ") at thread " + Thread.currentThread().getId() + "\n");
-            exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
-            exchange.getResponseSender().send(ex.getMessage(), IoCallback.END_EXCHANGE);
-            return null;
-        });
+        Map<String, Deque<String>> params = exchange.getQueryParameters();
+        final LocalDate from = params.containsKey("from")
+                ? LocalDate.parse(params.get("from").getFirst(), DateTimeFormatter.ISO_LOCAL_DATE)
+                : LocalDate.MIN;
+        final LocalDate to = params.containsKey("to")
+                ? LocalDate.parse(params.get("to").getFirst(), DateTimeFormatter.ISO_LOCAL_DATE)
+                : LocalDate.MAX;
+
+        String q = imagesQuery.replace("{USER}", user);
+        CompletableFuture<JSONArray> medical_images =
+                sc.send_query_and_parse(q)
+                        .thenComposeAsync(records -> {
+
+                            // The Triplestore does not have all the information that we want
+                            // e.g. the list of instances (images) contained in the Series
+                            // so we need to contact the DICOM server (duh!)
+                            final List<CompletableFuture<DICOMClient.Series>> completableFutureList = records.stream()
+                                    .map(map -> map.get("series_uid"))
+                                    .map(dc::find_series_async)
+                                    .collect(toList());
+
+                            return sequence(completableFutureList)
+                                    .thenApplyAsync((List<DICOMClient.Series> series_list) -> listOfSeriesToJSON(baseURI, series_list));
+                        });
+
+        CompletableFuture<JSONArray> drugs =
+                sc.send_query_and_parse(drugsQuery.replace("{USER}", user))
+                        .thenApplyAsync(records -> {
+
+                            List<JSONObject> results = records.stream()
+                                    .map(map -> {
+                                        JSONObject obj = new JSONObject();
+                                        obj.put("title", map.get("title"));
+                                        obj.put("atc_code", map.get("atc_code"));
+                                        obj.put("start_date", map.get("start_date").substring(0, 10));
+                                        obj.put("end_date", map.get("end_date").substring(0, 10));
+                                        JSONObject dose = new JSONObject();
+                                        dose.put("unit", map.get("dose_unit"));
+                                        dose.put("value", Float.parseFloat(map.getOrDefault("dose", "0.0")));
+                                        obj.put("dose", dose);
+                                        return obj;
+                                    }).collect(Collectors.toList());
+
+                            JSONArray list = new JSONArray();
+                            list.addAll(results);
+                            return list;
+                        });
+
+        CompletableFuture<JSONArray> signs =
+                sc.send_query_and_parse(vitalSignsQuery.replace("{USER}", user))
+                        .thenApplyAsync(records -> {
+
+                            List<JSONObject> results = records.stream()
+                                    .map(map -> {
+                                        JSONObject obj = new JSONObject();
+                                        obj.put("title", map.get("title"));
+                                        obj.put("loinc_code", map.getOrDefault("loinc_code", "").replace("http://purl.bioontology.org/ontology/LOINC/", ""));
+                                        obj.put("when", map.getOrDefault("inserted_date", "1974-01-06").substring(0, 10));
+                                        obj.put("units", map.get("units"));
+                                        obj.put("value", Float.parseFloat(map.getOrDefault("value", "0.0")));
+                                        return obj;
+                                    }).collect(Collectors.toList());
+
+                            JSONArray list = new JSONArray();
+                            list.addAll(results);
+                            return list;
+                        });
+
+        CompletableFuture<JSONArray> problems =
+                sc.send_query_and_parse(problemsQuery.replace("{USER}", user))
+                        .thenApplyAsync(records -> {
+
+                            List<JSONObject> results = records.stream()
+                                    .map(map -> {
+                                        JSONObject obj = new JSONObject();
+                                        obj.put("title", map.get("title"));
+                                        if (!"".equals(map.get("code_snomed"))) {
+                                            obj.put("code", map.get("code_snomed"));
+                                            obj.put("code_system", "SNOMED-CT");
+                                        } else {
+                                            obj.put("code", map.get("code_icd_10"));
+                                            obj.put("code_system", "ICD10");
+
+                                        }
+                                        return obj;
+                                    }).collect(Collectors.toList());
+
+                            JSONArray list = new JSONArray();
+                            list.addAll(results);
+                            return list;
+                        });
+        CompletableFuture.allOf(medical_images, drugs, signs, problems)
+                .whenComplete((v, ex) -> {
+                    if (ex != null) {
+                        ex.printStackTrace();
+                        if (exchange.getStatusCode() == StatusCodes.OK)
+                            exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
+                        exchange.getResponseSender().send(ex.getMessage());
+                        exchange.endExchange();
+                        return;
+                    }
+                    JSONArray probs = problems.join();
+                    JSONArray drgs = drugs.join();
+                    JSONArray vital_signs = signs.join();
+                    JSONArray images = medical_images.join();
+                    JSONObject summary = new JSONObject();
+//                    summary.put("id", pat_sum_uuid.join().toString());
+
+                    summary.put("active_problems", probs);
+                    summary.put("drugs", drgs);
+                    summary.put("vital_signs", vital_signs);
+                    JSONObject resObj = new JSONObject();
+                    resObj.put("summary", summary);
+                    resObj.put("medical_images", images);
+                    exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "application/json");
+                    final String jsonString = resObj.toJSONString();
+                    exchange.getResponseSender().send(jsonString);
+                });
+
+    }
+
+    private static JSONArray listOfSeriesToJSON(String baseURI,
+                                                List<DICOMClient.Series> series_list) {
+        final List<JSONObject> results = series_list.stream()
+                .filter(series -> !series.isNull())
+                .map(series -> {
+                    final String series_uid = series.seriesUID;
+                    JSONObject img = new JSONObject();
+                    img.put("series_uid", series_uid);
+                    img.put("when", series.seriesDate != null ? series.seriesDate.toInstant().toString().substring(0, 10) : null);
+                    img.put("study_uid", series.studyUID);
+                    img.put("study_description", series.studyDescription);
+                    img.put("modality", series.modality);
+                    img.put("instance_uids", series.instanceUID);
+                    img.put("count", series.instanceUID.size());
+                    final String selectInstance = series.instanceUID.get(series.instanceUID.size() / 2);
+                    img.put("icon", String.format("%s/wado?instance_uid=%s", baseURI, selectInstance));
+                    img.put("uri", String.format("%s/dcm?series_uid=%s", baseURI, series_uid));
+                    return img;
+                }).collect(toList());
+        JSONArray images = new JSONArray();
+        images.addAll(results);
+        return images;
     }
 
     private static void quickly_dispatch(final HttpServerExchange exchange, Runnable func) {
@@ -429,6 +506,8 @@ public class MHAClinicalAPI {
                 .build());
         //System.err.println("Configuration:\n"+config);
 
+        sparqlClient = new SPARQLClient(asyncHttpClient, config.getSparqlURL());
+
         dicomClient = new DICOMClient(asyncHttpClient);
         dicomClient.setHost(config.getDicomHost())
                 .setPort(config.getDicomPort())
@@ -441,13 +520,14 @@ public class MHAClinicalAPI {
             return;
         }
 
-//        dicomClient.get_series_async("1.3.6.1.4.1.19291.2.1.2.3427837366291351879037691429496729553844", new File("/tmp/osirix_v2"));
 
         CassandraClient.DB.connect(config.getCassandraKeyspace(), config.getCassandraUser(), config.getCassandraPwd(), config.getCassandraHost());
-        final SPARQLClient sc = new SPARQLClient(asyncHttpClient);
-        // String activities_query = readQueryFromFile("Activities.sparql");
+        final String imagesQuery = readQueryFromFile("DICOM_Series.sparql");
+        final String drugsQuery = readQueryFromFile("Drugs.sparql");
+        final String vitalSignsQuery = readQueryFromFile("Vital_signs.sparql");
+        final String problemsQuery = readQueryFromFile("Problems.sparql");
         // String diary_query = readQueryFromFile("Diary.sparql");
-        // System.out.println(activities_query);
+//        System.out.println(imagesQuery);
 
         final int port = config.getPort();
 
@@ -457,6 +537,7 @@ public class MHAClinicalAPI {
         final String tempStoreDir = tempUploadDir + File.separator + "_store";
 
         final HttpHandler wadoProxyHandler = Handlers.proxyHandler(new SimpleProxyClientProvider(dicomClient.getWadoUrl()));
+
         Undertow server = Undertow.builder()
                 .addHttpListener(port, "0.0.0.0")
                 .setHandler(routing()
@@ -468,19 +549,10 @@ public class MHAClinicalAPI {
                                 return;
                             }
                             final String user = queryParameters.get("u").getFirst();
-                            quickly_dispatch(exchange, () -> ask_cassandra(user, baseURI, exchange));
-                        })
-
-                        .get("/dcm.jpg", exchange -> {
-                            final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
-                            if (!queryParameters.containsKey("id")) {
-                                exchange.setStatusCode(StatusCodes.NOT_FOUND);
-                                exchange.getResponseSender().send("You must specify the 'id' query parameter");
-                                return;
-                            }
-                            final String id = queryParameters.get("id").getFirst();
-                            quickly_dispatch(exchange, () -> get_dcm_image(dicomClient, id, exchange));
-
+                            quickly_dispatch(exchange, () -> ask_triplestore(sparqlClient, dicomClient, user,
+                                    imagesQuery, drugsQuery, vitalSignsQuery,problemsQuery,
+                                    baseURI, exchange));
+//                             quickly_dispatch(exchange, () -> ask_cassandra(user, baseURI, exchange));
                         })
 
                         .get("/dcm", exchange -> { // Retrieve a whole series
