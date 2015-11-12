@@ -60,6 +60,7 @@ public class SPARQLClient {
     CompletableFuture<List<Map<String, String>>> send_query_and_parse(final String query) {
         return this.send_query(query)
                 .thenApply(csv -> {
+//                    System.out.printf("Got:\n"+csv);
                     CSVReader reader = new CSVReader(new StringReader(csv));
                     try {
                         String[] colNames = reader.readNext();

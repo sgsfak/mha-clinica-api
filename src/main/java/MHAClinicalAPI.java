@@ -356,6 +356,15 @@ public class MHAClinicalAPI {
                             // e.g. the list of instances (images) contained in the Series
                             // so we need to contact the DICOM server (duh!)
                             final List<CompletableFuture<DICOMClient.Series>> completableFutureList = records.stream()
+                                    .filter(row -> {
+                                        System.out.println(row);
+//                                        LocalDate when = LocalDate.parse(row.get("when").substring(0,10), DateTimeFormatter.ISO_LOCAL_DATE);
+                                        String when = row.get("when").substring(0,10);
+                                        final boolean b = from.toString().compareTo(when) < 0 && when.compareTo(to.toString())<0;
+                                        if (b)
+                                            System.out.println("---> " + row.get("series_uid") + " : " + from + " <= " + row.get("when") + " <= " + to + "=== " + b);
+                                        return b;
+                                    })
                                     .map(map -> map.get("series_uid"))
                                     .map(dc::find_series_async)
                                     .collect(toList());
@@ -369,6 +378,12 @@ public class MHAClinicalAPI {
                         .thenApplyAsync(records -> {
 
                             List<JSONObject> results = records.stream()
+                                    .filter(row -> {
+                                        LocalDate start = "".equals(row.get("start_date")) ? LocalDate.MIN : LocalDate.parse(row.get("start_date").substring(0,10), DateTimeFormatter.ISO_LOCAL_DATE);
+                                        LocalDate end = "".equals(row.get("end_date")) ? LocalDate.MAX : LocalDate.parse(row.get("end_date").substring(0,10), DateTimeFormatter.ISO_LOCAL_DATE);
+                                        boolean no_overlap = end.isBefore(from) || start.isAfter(to);
+                                        return !no_overlap;
+                                    })
                                     .map(map -> {
                                         JSONObject obj = new JSONObject();
                                         obj.put("title", map.get("title"));
@@ -392,6 +407,11 @@ public class MHAClinicalAPI {
                         .thenApplyAsync(records -> {
 
                             List<JSONObject> results = records.stream()
+                                    .filter(row -> {
+                                        LocalDate when = LocalDate.parse(row.get("inserted_date").substring(0,10), DateTimeFormatter.ISO_LOCAL_DATE);
+                                        boolean no_contains = when.isBefore(from) || when.isAfter(to);
+                                        return !no_contains;
+                                    })
                                     .map(map -> {
                                         JSONObject obj = new JSONObject();
                                         obj.put("title", map.get("title"));
