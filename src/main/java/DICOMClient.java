@@ -62,23 +62,6 @@ public class DICOMClient {
         return this;
     }
 
-    @Deprecated
-    public static boolean isDICOMFile(Path path) {
-        long magic_pos = 128;
-        File file = path.toFile();
-        // byte[] x = new byte [] {0x44, 0x49, 0x43, 0x4D, 0x02, 0x00}; // "DICM"
-        if (file.isDirectory() || file.length() < magic_pos + 4)
-            return false;
-        try (RandomAccessFile raf = new RandomAccessFile(path.toString(), "r")) {
-            raf.seek(magic_pos);
-            return raf.readInt() == 0x4449434D; // |DICM|
-        } catch (FileNotFoundException e) {
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        return false;
-    }
-
     public String toString() {
         return String.format("DICOMClient{%s:%d, calledAET=%s, callingAET=%s}",
                 this.host, this.port, this.srvAET, this.myAET);
@@ -518,29 +501,6 @@ public class DICOMClient {
         // See ftp://medical.nema.org/medical/dicom/final/sup85_ft.pdf
         return String.format("requestType=WADO&studyUID=&seriesUID=&objectUID=%s&rows=%d&imageQuality=%d&contentType=image/jpeg",
                 instanceUID, size, quality);
-    }
-
-    public CompletableFuture<Path> wado_retrieve_instance(final String instanceUID, final Path saveTo,
-                                                          final boolean downloadJpeg) {
-        Request r = new RequestBuilder()
-                .setMethod("GET")
-                .setUrl(wadoUrl)
-                .addQueryParam("requestType", "WADO")
-                .addQueryParam("studyUID", "")
-                .addQueryParam("seriesUID", "")
-                .addQueryParam("objectUID", instanceUID)
-                .addQueryParam("contentType", downloadJpeg ? "image/jpeg" : "application/dicom")
-                .build();
-        // System.out.println("-->" + r.getUri());
-        CompletableFuture<Path> fut = new CompletableFuture<>();
-        try {
-            final FileSaveHandler handler = new FileSaveHandler(saveTo, fut);
-            this.httpClient.executeRequest(r, handler);
-        } catch (FileNotFoundException e) {
-            e.printStackTrace();
-            fut = CompletableFuture.completedFuture(null);
-        }
-        return fut;
     }
 
 }
