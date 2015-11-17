@@ -10,14 +10,16 @@ import io.undertow.Handlers;
 import io.undertow.Undertow;
 import io.undertow.io.DefaultIoCallback;
 import io.undertow.io.Sender;
+import io.undertow.server.HandlerWrapper;
 import io.undertow.server.HttpHandler;
 import io.undertow.server.HttpServerExchange;
+import io.undertow.server.RoutingHandler;
+import io.undertow.server.handlers.accesslog.AccessLogHandler;
+import io.undertow.server.handlers.accesslog.DefaultAccessLogReceiver;
 import io.undertow.server.handlers.proxy.SimpleProxyClientProvider;
-import io.undertow.util.Headers;
-import io.undertow.util.HttpString;
-import io.undertow.util.SameThreadExecutor;
-import io.undertow.util.StatusCodes;
+import io.undertow.util.*;
 import net.minidev.json.JSONArray;
+import net.minidev.json.JSONNavi;
 import net.minidev.json.JSONObject;
 
 import java.io.*;
@@ -31,8 +33,9 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import static io.undertow.Handlers.routing;
 import static java.util.stream.Collectors.*;
@@ -120,18 +123,13 @@ public class MHAClinicalAPI {
 
 
     private static void safelyDeleteFileOrDir(Path path) {
-        try (Stream<Path> pathStream = Files.walk(path)) {
-            pathStream.sorted(Comparator.comparing(Path::getNameCount).reversed())
-                    .forEach(p -> {
-                        try {
-                            // System.out.println("Deleting " + p);
-                            Files.delete(p);
-                        } catch (IOException e) {
-                            e.printStackTrace();
-                        }
-                    });
+        try {
+            if (Files.isDirectory(path))
+                FileUtils.deleteRecursive(path);
+            else
+                Files.delete(path);
         } catch (IOException e) {
-            e.printStackTrace();
+            // ignored
         }
     }
 
@@ -340,47 +338,62 @@ public class MHAClinicalAPI {
                                        final String baseURI, HttpServerExchange exchange) {
 
         Map<String, Deque<String>> params = exchange.getQueryParameters();
-        final LocalDate from = params.containsKey("from")
-                ? LocalDate.parse(params.get("from").getFirst(), DateTimeFormatter.ISO_LOCAL_DATE)
-                : LocalDate.MIN;
-        final LocalDate to = params.containsKey("to")
-                ? LocalDate.parse(params.get("to").getFirst(), DateTimeFormatter.ISO_LOCAL_DATE)
-                : LocalDate.MAX;
+        final LocalDate from = LocalDate.parse(params.containsKey("from")
+                ? params.get("from").getFirst()
+                : "1800-01-01", DateTimeFormatter.ISO_LOCAL_DATE);
+        final LocalDate to = LocalDate.parse(params.containsKey("to")
+                ? params.get("to").getFirst()
+                : "9999-12-30", DateTimeFormatter.ISO_LOCAL_DATE);
 
-        String q = imagesQuery.replace("{USER}", user);
+        String q = imagesQuery.replace("{USER}", user)
+                .replace("{START_DATE}", from.toString())
+                .replace("{END_DATE}", to.toString());
+        // System.out.println(q);
         CompletableFuture<JSONArray> medical_images =
                 sc.send_query_and_parse(q)
-                        .thenComposeAsync(records -> {
+                        .thenApplyAsync(records -> {
+                            Pattern pattern = Pattern.compile("'[\\d.]+'"); // Match an instance UID in single quotes
+                            List<JSONObject> results = records.stream()
+                                    .map(map -> {
+                                        final String series_uid = map.get("series_uid");
+                                        JSONObject img = new JSONObject();
+                                        img.put("series_uid", series_uid);
+                                        img.put("when", map.get("when"));
+                                        img.put("study_uid", ""); // XXX
+                                        img.put("study_description", map.get("study_description"));
+                                        img.put("modality", map.get("modality"));
+                                        final Matcher matcher = pattern.matcher(map.get("instance_uids"));
+                                        List<String> inst_uids = new ArrayList<>();
+                                        // Find all matches
+                                        while (matcher.find()) {
+                                            // Get the matching string
+                                            String match = matcher.group();
+                                            inst_uids.add(match.substring(1, match.length() - 1));
+                                        }
 
-                            // The Triplestore does not have all the information that we want
-                            // e.g. the list of instances (images) contained in the Series
-                            // so we need to contact the DICOM server (duh!)
-                            final List<CompletableFuture<DICOMClient.Series>> completableFutureList = records.stream()
-                                    .filter(row -> {
-                                        System.out.println(row);
-//                                        LocalDate when = LocalDate.parse(row.get("when").substring(0,10), DateTimeFormatter.ISO_LOCAL_DATE);
-                                        String when = row.get("when").substring(0,10);
-                                        final boolean b = from.toString().compareTo(when) < 0 && when.compareTo(to.toString())<0;
-                                        if (b)
-                                            System.out.println("---> " + row.get("series_uid") + " : " + from + " <= " + row.get("when") + " <= " + to + "=== " + b);
-                                        return b;
-                                    })
-                                    .map(map -> map.get("series_uid"))
-                                    .map(dc::find_series_async)
-                                    .collect(toList());
+                                        img.put("instance_uids", inst_uids);
+                                        img.put("count", inst_uids.size());
+                                        if (inst_uids.size() > 0) {
+                                            final String selectInstance = inst_uids.get(inst_uids.size() / 2);
+                                            img.put("icon", String.format("%s/wado?instance_uid=%s", baseURI, selectInstance));
+                                            img.put("uri", String.format("%s/dcm?series_uid=%s", baseURI, series_uid));
+                                        }
+                                        return img;
 
-                            return sequence(completableFutureList)
-                                    .thenApplyAsync((List<DICOMClient.Series> series_list) -> listOfSeriesToJSON(baseURI, series_list));
+                                    }).collect(Collectors.toList());
+
+                            JSONArray list = new JSONArray();
+                            list.addAll(results);
+                            return list;
                         });
 
         CompletableFuture<JSONArray> drugs =
                 sc.send_query_and_parse(drugsQuery.replace("{USER}", user))
                         .thenApplyAsync(records -> {
-
                             List<JSONObject> results = records.stream()
                                     .filter(row -> {
-                                        LocalDate start = "".equals(row.get("start_date")) ? LocalDate.MIN : LocalDate.parse(row.get("start_date").substring(0,10), DateTimeFormatter.ISO_LOCAL_DATE);
-                                        LocalDate end = "".equals(row.get("end_date")) ? LocalDate.MAX : LocalDate.parse(row.get("end_date").substring(0,10), DateTimeFormatter.ISO_LOCAL_DATE);
+                                        LocalDate start = "".equals(row.get("start_date")) ? LocalDate.MIN : LocalDate.parse(row.get("start_date").substring(0, 10), DateTimeFormatter.ISO_LOCAL_DATE);
+                                        LocalDate end = "".equals(row.get("end_date")) ? LocalDate.MAX : LocalDate.parse(row.get("end_date").substring(0, 10), DateTimeFormatter.ISO_LOCAL_DATE);
                                         boolean no_overlap = end.isBefore(from) || start.isAfter(to);
                                         return !no_overlap;
                                     })
@@ -405,18 +418,18 @@ public class MHAClinicalAPI {
         CompletableFuture<JSONArray> signs =
                 sc.send_query_and_parse(vitalSignsQuery.replace("{USER}", user))
                         .thenApplyAsync(records -> {
-
                             List<JSONObject> results = records.stream()
                                     .filter(row -> {
-                                        LocalDate when = LocalDate.parse(row.get("inserted_date").substring(0,10), DateTimeFormatter.ISO_LOCAL_DATE);
-                                        boolean no_contains = when.isBefore(from) || when.isAfter(to);
-                                        return !no_contains;
+                                        if ("".equals(row.get("inserted_date")))
+                                            return true;
+                                        LocalDate when = LocalDate.parse(row.get("inserted_date").substring(0, 10), DateTimeFormatter.ISO_LOCAL_DATE);
+                                        return when.isBefore(to) && when.isAfter(from);
                                     })
                                     .map(map -> {
                                         JSONObject obj = new JSONObject();
                                         obj.put("title", map.get("title"));
                                         obj.put("loinc_code", map.getOrDefault("loinc_code", "").replace("http://purl.bioontology.org/ontology/LOINC/", ""));
-                                        obj.put("when", map.getOrDefault("inserted_date", "1974-01-06").substring(0, 10));
+                                        obj.put("when", "".equals(map.get("inserted_date")) ? map.get("inserted_date").substring(0, 10) : null);
                                         obj.put("units", map.get("units"));
                                         obj.put("value", Float.parseFloat(map.getOrDefault("value", "0.0")));
                                         return obj;
@@ -430,7 +443,6 @@ public class MHAClinicalAPI {
         CompletableFuture<JSONArray> problems =
                 sc.send_query_and_parse(problemsQuery.replace("{USER}", user))
                         .thenApplyAsync(records -> {
-
                             List<JSONObject> results = records.stream()
                                     .map(map -> {
                                         JSONObject obj = new JSONObject();
@@ -441,7 +453,6 @@ public class MHAClinicalAPI {
                                         } else {
                                             obj.put("code", map.get("code_icd_10"));
                                             obj.put("code_system", "ICD10");
-
                                         }
                                         return obj;
                                     }).collect(Collectors.toList());
@@ -558,114 +569,128 @@ public class MHAClinicalAPI {
 
         final HttpHandler wadoProxyHandler = Handlers.proxyHandler(new SimpleProxyClientProvider(dicomClient.getWadoUrl()));
 
-        Undertow server = Undertow.builder()
-                .addHttpListener(port, "0.0.0.0")
-                .setHandler(routing()
-                        .get("/patsum", exchange -> {
+
+        final HandlerWrapper tokenValidator = new AccessTokenValidator(config.getAccessTokenValidatorURI());
+
+        final RoutingHandler routes = routing()
+                .get("/patsum", exchange -> {
+                    final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
+                    if (!queryParameters.containsKey("u")) {
+                        exchange.setStatusCode(StatusCodes.NOT_FOUND);
+                        exchange.getResponseSender().send("You must specify the 'user' in the 'u' query parameter");
+                        return;
+                    }
+                    final String user = queryParameters.get("u").getFirst();
+                    quickly_dispatch(exchange, () -> ask_triplestore(sparqlClient, dicomClient, user,
+                            imagesQuery, drugsQuery, vitalSignsQuery, problemsQuery,
+                            baseURI, exchange));
+                })
+
+                .get("/dcm", exchange -> { // Retrieve a whole series
+                    final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
+                    if (!queryParameters.containsKey("series_uid")) {
+                        exchange.setStatusCode(StatusCodes.NOT_FOUND);
+                        exchange.getResponseSender().send("You must specify the 'series_uid' query parameter");
+                        return;
+                    }
+                    final String seriesUid = queryParameters.get("series_uid").getFirst();
+                    quickly_dispatch(exchange, () -> get_dcm_series(dicomClient, seriesUid, exchange));
+                })
+
+                .get("/wado",
+                        exchange -> {
                             final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
-                            if (!queryParameters.containsKey("u")) {
+                            if (!queryParameters.containsKey("instance_uid")) {
                                 exchange.setStatusCode(StatusCodes.NOT_FOUND);
-                                exchange.getResponseSender().send("You must specify the 'user' in the 'u' query parameter");
+                                exchange.getResponseSender().send("You must specify the 'instance_uid' query parameter");
                                 return;
                             }
-                            final String user = queryParameters.get("u").getFirst();
-                            quickly_dispatch(exchange, () -> ask_triplestore(sparqlClient, dicomClient, user,
-                                    imagesQuery, drugsQuery, vitalSignsQuery,problemsQuery,
-                                    baseURI, exchange));
-//                             quickly_dispatch(exchange, () -> ask_cassandra(user, baseURI, exchange));
+                            exchange.setQueryString(DICOMClient.build_wado_request_query(queryParameters.get("instance_uid").getFirst()));
+                            exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "image/jpeg");
+                            exchange.getResponseHeaders().put(Headers.CACHE_CONTROL, "max-age=86400");
+                            wadoProxyHandler.handleRequest(exchange);
                         })
-
-                        .get("/dcm", exchange -> { // Retrieve a whole series
-                            final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
-                            if (!queryParameters.containsKey("series_uid")) {
-                                exchange.setStatusCode(StatusCodes.NOT_FOUND);
-                                exchange.getResponseSender().send("You must specify the 'series_uid' query parameter");
-                                return;
-                            }
-                            final String seriesUid = queryParameters.get("series_uid").getFirst();
-                            quickly_dispatch(exchange, () -> get_dcm_series(dicomClient, seriesUid, exchange));
-
-                        })
-
-                        .get("/wado",
-                                exchange -> {
-                                    final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
-                                    if (!queryParameters.containsKey("instance_uid")) {
+                .get("/series", exchange -> {
+                    final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
+                    if (!queryParameters.containsKey("series_uid")) {
+                        exchange.setStatusCode(StatusCodes.NOT_FOUND);
+                        exchange.getResponseSender().send("You must specify the 'series_uid' query parameter");
+                        return;
+                    }
+                    final String seriesUid = queryParameters.get("series_uid").getFirst();
+                    if ("".equals(seriesUid)) {
+                        exchange.setStatusCode(StatusCodes.NOT_FOUND);
+                        exchange.getResponseSender().send("You must specify a non-empty value for the 'id' query parameter");
+                        return;
+                    }
+                    quickly_dispatch(exchange, () -> {
+                        dicomClient.find_series_async(seriesUid)
+                                .thenAccept(series -> {
+                                    System.out.println(String.format("<%s> Series %s, pat_id=%s, study=%s, modality=%s\n",
+                                            Thread.currentThread().getName(),
+                                            series.seriesUID, series.patientId, series.studyUID, series.modality));
+                                    if (series.isNull()) {
                                         exchange.setStatusCode(StatusCodes.NOT_FOUND);
-                                        exchange.getResponseSender().send("You must specify the 'instance_uid' query parameter");
+                                        exchange.getResponseSender().send(String.format("Series <%s> does not contain any instances!\n", seriesUid));
+                                        exchange.endExchange();
                                         return;
                                     }
-                                    exchange.setQueryString(DICOMClient.build_wado_request_query(queryParameters.get("instance_uid").getFirst()));
-                                    exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "image/jpeg");
-                                    exchange.getResponseHeaders().put(Headers.CACHE_CONTROL, "max-age=86400");
-                                    wadoProxyHandler.handleRequest(exchange);
+
+                                    JSONObject js = new JSONObject();
+                                    js.put("series_uid", series.seriesUID);
+                                    js.put("patient_uid", series.patientId);
+                                    js.put("study_uid", series.studyUID);
+                                    js.put("series_date", series.seriesDate);
+                                    js.put("instance_uids", series.instanceUID.stream()
+                                            .map(instance_uid -> JSONNavi.newInstanceObject()
+                                                    .set("instance_uid", instance_uid)
+                                                    .set("href", baseURI + "/wado?instance_uid=" + instance_uid)
+                                                    .getRoot())
+                                            .collect(toList()));
+
+                                    exchange.setStatusCode(StatusCodes.OK);
+                                    exchange.getResponseHeaders().put(new HttpString(HttpHeaders.CONTENT_TYPE), "application/json");
+                                    exchange.getResponseSender().send(js.toJSONString());
+                                    exchange.endExchange();
                                 })
-                        .get("/series", exchange -> {
-                            final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
-                            if (!queryParameters.containsKey("id")) {
-                                exchange.setStatusCode(StatusCodes.NOT_FOUND);
-                                exchange.getResponseSender().send("You must specify the 'id' query parameter");
-                                return;
-                            }
-                            final String seriesUid = queryParameters.get("id").getFirst();
-                            if ("".equals(seriesUid)) {
-                                exchange.setStatusCode(StatusCodes.NOT_FOUND);
-                                exchange.getResponseSender().send("You must specify a non-empty value for the 'id' query parameter");
-                                return;
-                            }
-                            quickly_dispatch(exchange, () -> {
-                                dicomClient.find_series_async(seriesUid)
-                                        .thenAccept(series -> {
-                                            System.out.println(String.format("<%s> Series %s, pat_id=%s, study=%s, modality=%s\n",
-                                                    Thread.currentThread().getName(),
-                                                    series.seriesUID, series.patientId, series.studyUID, series.modality));
-                                            if (series.isNull()) {
-                                                exchange.setStatusCode(StatusCodes.NOT_FOUND);
-                                                exchange.getResponseSender().send(String.format("Series <%s> does not contain any instances!\n", seriesUid));
-                                                exchange.endExchange();
-                                                return;
-                                            }
-
-                                            JSONObject js = new JSONObject();
-                                            js.put("series_uid", series.seriesUID);
-                                            js.put("patient_uid", series.patientId);
-                                            js.put("study_uid", series.studyUID);
-                                            js.put("series_date", series.seriesDate);
-                                            js.put("instance_uids", series.instanceUID.stream()
-                                                    .map(instance_uid -> {
-                                                        JSONObject jsi = new JSONObject();
-                                                        jsi.put("instance_uid", instance_uid);
-                                                        jsi.put("href", baseURI + "/wado?instance_uid=" + instance_uid);
-                                                        return jsi;
-                                                    })
-                                                    .collect(toList()));
-
-                                            exchange.setStatusCode(StatusCodes.OK);
-                                            exchange.getResponseHeaders().put(new HttpString(HttpHeaders.CONTENT_TYPE), "application/json");
-                                            exchange.getResponseSender().send(js.toJSONString());
-                                            exchange.endExchange();
-                                        })
-                                        .exceptionally(ex -> {
-                                            exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
-                                            exchange.getResponseHeaders().put(new HttpString(HttpHeaders.CONTENT_TYPE), "text/plain");
-                                            exchange.getResponseSender().send(ex.getMessage());
-                                            exchange.endExchange();
-                                            return null;
-                                        });
-                            });
+                                .exceptionally(ex -> {
+                                    exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
+                                    exchange.getResponseHeaders().put(new HttpString(HttpHeaders.CONTENT_TYPE), "text/plain");
+                                    exchange.getResponseSender().send(ex.getMessage());
+                                    exchange.endExchange();
+                                    return null;
+                                });
+                    });
 
 
-                        })
+                })
 
-                        .add("options", "/upload", exchange -> {
-                            exchange.setStatusCode(StatusCodes.NO_CONTENT);
-                            exchange.getResponseHeaders().put(new HttpString("Access-Control-Allow-Origin"), "*");
-                            exchange.getResponseHeaders().put(new HttpString("Access-Control-Allow-Methods"), "POST, GET, OPTIONS");
-                            exchange.endExchange();
+                .add("options", "/upload", exchange -> {
+                    exchange.setStatusCode(StatusCodes.NO_CONTENT);
+                    exchange.getResponseHeaders().put(new HttpString("Access-Control-Allow-Origin"), "*");
+                    exchange.getResponseHeaders().put(new HttpString("Access-Control-Allow-Methods"), "POST, GET, OPTIONS");
+                    exchange.endExchange();
 
-                        })
-                        .post("/upload", new UploadHandler(tempUploadDir, tempStoreDir))).
-                        build();
+                })
+                .post("/upload", new UploadHandler(tempUploadDir, tempStoreDir));
+
+
+        HttpHandler rootHandler = tokenValidator.wrap(routes);
+        if (config.getLogDirPath() != null) {
+            final AccessLogHandler logHandler = new AccessLogHandler(rootHandler,
+                    new DefaultAccessLogReceiver(Executors.newSingleThreadExecutor(),
+                            config.getLogDirPath().toFile(),
+                            "access_log."),
+                    "combined",
+                    MHAClinicalAPI.class.getClassLoader());
+            rootHandler = logHandler;
+            System.out.println("Logging available at "+config.getLogDirPath());
+        }
+
+        Undertow server = Undertow.builder()
+                .addHttpListener(port, "0.0.0.0")
+                .setHandler(rootHandler)
+                .build();
 
         server.start();
         Runtime.getRuntime().addShutdownHook(new Thread(server::stop));

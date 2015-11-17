@@ -8,13 +8,13 @@ PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 PREFIX acgt:<http://www.ifomis.org/acgt/1.0#>
 PREFIX snomedct:<http://purl.bioontology.org/ontology/SNOMEDCT/>
 
-SELECT DISTINCT ?modality ?study_description ?when ?series_uid
+SELECT DISTINCT ?modality ?study_description ?when ?series_uid ?instance_uids
 {
 #patient has name
 	?patient transmed:has_identifier ?identifier.
 
 #identifier has value
-        ?identifier transmed:TMO_0185 ?mha_uid.
+        ?identifier transmed:TMO_0185 ?mha_uid .
 
 		
 #patient has encounter
@@ -37,5 +37,10 @@ SELECT DISTINCT ?modality ?study_description ?when ?series_uid
 #series has value
 	?seriesv transmed:TMO_0185 ?series_uid.
 
+#series has instance uids
+	?seriesv transmed:has_instance_uids ?instance_uids.
+
 FILTER (?mha_uid = "{USER}").
+FILTER (?when >= "{START_DATE}"^^xsd:date).
+FILTER (?when <= "{END_DATE}"^^xsd:date).
 }

@@ -1,5 +1,8 @@
 import java.io.*;
 import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Optional;
 import java.util.Properties;
 
@@ -10,8 +13,11 @@ public class Configuration {
     private Properties properties;
 
     private int port;
+    private Path logDirPath;
     private String tempUploadDir;
     private String myURI;
+
+    private String accessTokenValidatorURI;
 
     private String cassandraHost;
     private String cassandraUser;
@@ -49,7 +55,18 @@ public class Configuration {
 
             config.port = Optional.of(config.properties.getProperty("PORT")).map(Integer::parseInt).orElse(9090);
 
+            String logDir = config.properties.getProperty("LOGFILE_DIR");
+            if (logDir != null) {
+                final Path logDirPath = Paths.get(logDir);
+                if (!Files.exists(logDirPath) || !logDirPath.toFile().isDirectory())
+                    Files.createDirectory(logDirPath);
+                config.logDirPath = logDirPath;
+            }
+
+
             config.tempUploadDir = Optional.of(config.properties.getProperty("TEMP_UPLOAD_DIR")).orElse("/tmp/mhaclinicalapi/uploads");
+
+            config.accessTokenValidatorURI = config.properties.getProperty("MHA_ACCESS_TOKEN_VALIDATOR_URI");
 
             config.cassandraHost = config.properties.getProperty("CASSANDRA_HOST");
             config.cassandraUser = config.properties.getProperty("CASSANDRA_USER");
@@ -82,6 +99,12 @@ public class Configuration {
     public int getPort() {
         return port;
     }
+
+    public Path getLogDirPath() {
+        return logDirPath;
+    }
+
+    public String getAccessTokenValidatorURI() { return accessTokenValidatorURI; }
 
     public String toString()
     {
