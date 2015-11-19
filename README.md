@@ -52,7 +52,7 @@ The Clinical API server is typically deployed behind a reverse proxy that accept
 		RewriteRule ^/mha/clinical-api/(.*)$ http://<server-ip>:9595/$1 [P]
 ```
 
-where `<server-ip>` is the IP (or DNS name) of the Clinical API server (by default it listens on port 9595). If done this way, the server will accept the session "[cookies](https://en.wikipedia.org/wiki/HTTP_cookie)" after a user logs into the MHA portal and then it forwards them to the MHA "token/session validation API", e.g. to `https://myhealthavatar.org/mha/api/me` 
+where `<server-ip>` is the IP (or DNS name) of the Clinical API server (by default it listens on port 9595). If done this way, the server will accept the session "[cookies](https://en.wikipedia.org/wiki/HTTP_cookie)" after a user logs into the MHA portal and then it forwards them to the MHA "token/session validation API", e.g. to `https://myhealthavatar.org/mha/api/me`. The prefix `/mha/clinical-api/` can be changed but in that case you need to also adapt the `BASE_URI` property in the server's config file (see below).
 
 ### Configuration
 
@@ -60,8 +60,10 @@ Check the `config.properties` file, shown also below:
 
 ```
 ### Configuration properties for the MHA-ClinicalAPI server
-## The listening port, log file (if needed), and temporary upload files location
+## The listening port, the "base URL" (i.e. the externally visible url that any request to it is forwarded to 
+## our server by the Proxy), log file (if needed), and temporary upload files location
 PORT=9595
+BASE_URI=https://myhealthavatar.org/mha/clinical-api
 LOGFILE_DIR=/tmp/mha_clinical_api
 TEMP_UPLOAD_DIR=/tmp/mha/uploads
 
