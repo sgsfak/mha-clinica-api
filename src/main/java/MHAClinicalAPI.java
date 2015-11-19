@@ -575,12 +575,8 @@ public class MHAClinicalAPI {
         final RoutingHandler routes = routing()
                 .get("/patsum", exchange -> {
                     final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
-                    if (!queryParameters.containsKey("u")) {
-                        exchange.setStatusCode(StatusCodes.NOT_FOUND);
-                        exchange.getResponseSender().send("You must specify the 'user' in the 'u' query parameter");
-                        return;
-                    }
-                    final String user = queryParameters.get("u").getFirst();
+                    final String user = queryParameters.containsKey("u") ? queryParameters.get("u").getFirst()
+                            : exchange.getAttachment(AccessTokenValidator.MHA_ACCOUNT).getPrincipal().getName();
                     quickly_dispatch(exchange, () -> ask_triplestore(sparqlClient, dicomClient, user,
                             imagesQuery, drugsQuery, vitalSignsQuery, problemsQuery,
                             baseURI, exchange));
