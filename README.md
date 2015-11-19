@@ -1,3 +1,4 @@
+### Introduction
 This is the code for the Clinical API server for the [MyHealthAvatar](http://myhealthavatar.org/) project. This service offers a RESTful interface with the following functionalities:
 
 * Upload a zip of DICOM images. The files are then sent to the backend DICOM server (using C-STORE command). The endpoint for this is the `/upload` using the `POST` HTTP method and it's compliant with the [Resumable.js](http://www.resumablejs.com/) client side (javascript) library, so that pretty large files can be uploaded in a robust way. This endpoint also supports [CORS](https://en.wikipedia.org/wiki/Cross-origin_resource_sharing)
@@ -39,6 +40,51 @@ The following drawing shows the architecture:
                                       |                          |
                                       +--------------------------+
 
+```
+
+
+### Security
+
+The Clinical API server is typically deployed behind a reverse proxy that accepts all the requests for the MHA APIs and services and then routes to the responsible backend server. For the Clinical API server a typical [Apache 2](https://httpd.apache.org/) configuration that uses the [mod_rewrite](https://httpd.apache.org/docs/current/mod/mod_rewrite.html) and its [proxy support](https://httpd.apache.org/docs/current/rewrite/flags.html#flag_p) is the following:
+
+```
+		RewriteEngine on
+		RewriteRule ^/mha/clinical-api/(.*)$ http://<server-ip>:9595/$1 [P]
+```
+
+where `<server-ip>` is the IP (or DNS name) of the Clinical API server (by default it listens on port 9595). If done this way, the server will accept the session "[cookies](https://en.wikipedia.org/wiki/HTTP_cookie)" after a user logs into the MHA portal and then it forwards them to the MHA "token/session validation API", e.g. to `https://myhealthavatar.org/mha/api/me` 
+
+### Configuration
+
+Check the `config.properties` file, shown also below:
+
+```
+### Configuration properties for the MHA-ClinicalAPI server
+## The listening port, log file (if needed), and temporary upload files location
+PORT=9595
+LOGFILE_DIR=/tmp/mha_clinical_api
+TEMP_UPLOAD_DIR=/tmp/mha/uploads
+
+## Configuration for the validation of session cookies and tokens
+MHA_ACCESS_TOKEN_VALIDATOR_URI=https://myhealthavatar.org/mha/api/me
+
+## DICOM Configuration
+## Specify the DICOM Server host, port, "application entity", and WADO URL
+DICOM_SERVER_HOST=localhost
+DICOM_SERVER_PORT=11112
+DICOM_SERVER_AET=DCM4CHEE
+DICOM_MY_AET=MHAUploadAPI
+DICOM_WADO_URL=http://localhost:8080/wado
+
+## Triplestore
+SPARQL_URL=<the endpoint accepting SPARQL requests>
+
+## Cassandra
+## Specify the connection parameters for Cassandra
+CASSANDRA_HOST=10.1.5.13
+CASSANDRA_KEYSPACE=mha_clinical
+CASSANDRA_USER=<user-name>
+CASSANDRA_PASSWORD=<password>
 ```
 
 --- 
