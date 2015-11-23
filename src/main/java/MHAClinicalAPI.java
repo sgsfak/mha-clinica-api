@@ -429,7 +429,7 @@ public class MHAClinicalAPI {
                                         JSONObject obj = new JSONObject();
                                         obj.put("title", map.get("title"));
                                         obj.put("loinc_code", map.getOrDefault("loinc_code", "").replace("http://purl.bioontology.org/ontology/LOINC/", ""));
-                                        obj.put("when", "".equals(map.get("inserted_date")) ? map.get("inserted_date").substring(0, 10) : null);
+                                        obj.put("when", "".equals(map.get("inserted_date")) ? null : map.get("inserted_date").substring(0, 10));
                                         obj.put("units", map.get("units"));
                                         obj.put("value", Float.parseFloat(map.getOrDefault("value", "0.0")));
                                         return obj;

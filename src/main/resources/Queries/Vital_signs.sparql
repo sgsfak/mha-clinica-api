@@ -46,4 +46,7 @@ WHERE {
 #units of measurement have value
 	?units_of_measurement transmed:TMO_0185 ?units.
 
+
+FILTER (?mha_uid = "{USER}").
+
 }
