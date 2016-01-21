@@ -54,6 +54,24 @@ The Clinical API server is typically deployed behind a reverse proxy that accept
 
 where `<server-ip>` is the IP (or DNS name) of the Clinical API server (by default it listens on port 9595). If done this way, the server will accept the session "[cookies](https://en.wikipedia.org/wiki/HTTP_cookie)" after a user logs into the MHA portal and then it forwards them to the MHA "token/session validation API", e.g. to `https://myhealthavatar.org/mha/api/me`. The prefix `/mha/clinical-api/` can be changed but in that case you need to also adapt the `BASE_URI` property in the server's config file (see below).
 
+By the way, the same configuration for the [nginx](https://www.nginx.com/) web server is as follows:
+
+```
+location /mha/clinical-api {
+    rewrite  ^/mha/clinical-api/(.*)  /$1 break;
+    proxy_redirect     off;
+    proxy_set_header   X-Real-IP         $remote_addr;
+    proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header   X-Forwarded-Proto $scheme;
+    proxy_set_header   Host              $http_host;
+    proxy_set_header   X-NginX-Proxy     true;
+    proxy_set_header   Connection        "";
+    proxy_http_version 1.1;
+    proxy_pass         http://127.0.0.1:9595;
+}
+```
+
+
 ### Configuration
 
 Check the `config.properties` file, shown also below:
