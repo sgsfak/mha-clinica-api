@@ -491,6 +491,46 @@ public class MHAClinicalAPI {
 
     }
 
+    public static void alerts_from_triplestore(SPARQLClient sc, final String user,
+                                               final String alertsQuery,
+                                               final HttpServerExchange exchange) {
+
+        String q = alertsQuery.replace("{USER}", user);
+        // System.out.println(q);
+        CompletableFuture<JSONArray> alerts =
+                sc.send_query_and_parse(q)
+                        .thenApplyAsync(records -> {
+                            List<JSONObject> results = records.stream()
+                                    .map(map -> {
+                                        JSONObject obj = new JSONObject();
+                                        obj.put("title", map.get("title"));
+                                        obj.put("when", "".equals(map.get("date")) ? null : map.get("date").substring(0, 10));
+                                        return obj;
+                                    }).collect(Collectors.toList());
+
+                            JSONArray list = new JSONArray();
+                            list.addAll(results);
+                            return list;
+                        });
+        alerts.whenComplete((jsonArray, ex) -> {
+            if (ex != null) {
+                ex.printStackTrace();
+                exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
+                exchange.getResponseSender().send(ex.getMessage());
+                exchange.endExchange();
+                return;
+            }
+            exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "application/json");
+
+            JSONObject resObj = new JSONObject();
+            resObj.put("alerts", jsonArray);
+            final String jsonString = resObj.toJSONString();
+            exchange.getResponseSender().send(jsonString);
+
+        });
+    }
+
+
     private static JSONArray listOfSeriesToJSON(String baseURI,
                                                 List<DICOMClient.Series> series_list) {
         final List<JSONObject> results = series_list.stream()
@@ -557,6 +597,7 @@ public class MHAClinicalAPI {
         final String drugsQuery = readQueryFromFile("Drugs.sparql");
         final String vitalSignsQuery = readQueryFromFile("Vital_signs.sparql");
         final String problemsQuery = readQueryFromFile("Problems.sparql");
+        final String alertsQuery = readQueryFromFile("Alerts.sparql");
         // String diary_query = readQueryFromFile("Diary.sparql");
 //        System.out.println(imagesQuery);
 
@@ -580,6 +621,14 @@ public class MHAClinicalAPI {
                     quickly_dispatch(exchange, () -> ask_triplestore(sparqlClient, dicomClient, user,
                             imagesQuery, drugsQuery, vitalSignsQuery, problemsQuery,
                             baseURI, exchange));
+                })
+
+                .get("/alerts", exchange -> {
+                    final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
+                    final String user = queryParameters.containsKey("u") ? queryParameters.get("u").getFirst()
+                            : exchange.getAttachment(AccessTokenValidator.MHA_ACCOUNT).getPrincipal().getName();
+                    quickly_dispatch(exchange, () -> alerts_from_triplestore(sparqlClient, user,
+                            alertsQuery, exchange));
                 })
 
                 .get("/dcm", exchange -> { // Retrieve a whole series
@@ -680,7 +729,7 @@ public class MHAClinicalAPI {
                     "combined",
                     MHAClinicalAPI.class.getClassLoader());
             rootHandler = logHandler;
-            System.out.println("Logging available at "+config.getLogDirPath());
+            System.out.println("Logging available at " + config.getLogDirPath());
         }
 
         Undertow server = Undertow.builder()

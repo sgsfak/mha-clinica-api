@@ -1,0 +1,24 @@
+PREFIX : <http://www.semanticweb.org/kondylak/ontologies/2013/1/untitled-ontology-86#>
+PREFIX obo: <http://purl.obolibrary.org/obo/>
+PREFIX ro: <http://www.obofoundry.org/ro/ro.owl#>
+PREFIX transmed: <http://www.w3.org/2001/sw/hcls/ns/transmed/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX acgt:<http://www.ifomis.org/acgt/1.0#>
+PREFIX snomedct:<http://purl.bioontology.org/ontology/SNOMEDCT/>
+
+SELECT DISTINCT ?mha_uid ?title   ?date
+{
+
+?patient_id transmed:has_alert ?alert1.
+?patient_id transmed:TMO_0185 ?mha_uid.
+
+?alert1 transmed:alert_title ?title.
+?alert1 transmed:alert_date ?date.
+
+
+FILTER (?mha_uid = "{USER}").
+
+}
+ORDER BY DESC(?date)
