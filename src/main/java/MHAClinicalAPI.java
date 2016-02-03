@@ -697,7 +697,7 @@ public class MHAClinicalAPI {
         }
 
 
-        // CassandraClient.DB.connect(config.getCassandraKeyspace(), config.getCassandraUser(), config.getCassandraPwd(), config.getCassandraHost());
+        CassandraClient.DB.connect(config.getCassandraKeyspace(), config.getCassandraUser(), config.getCassandraPwd(), config.getCassandraHost());
         final String imagesQuery = readQueryFromFile("DICOM_Series.sparql");
         final String drugsQuery = readQueryFromFile("Drugs.sparql");
         final String vitalSignsQuery = readQueryFromFile("Vital_signs.sparql");
