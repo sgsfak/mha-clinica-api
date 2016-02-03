@@ -14,6 +14,7 @@ import io.undertow.server.HandlerWrapper;
 import io.undertow.server.HttpHandler;
 import io.undertow.server.HttpServerExchange;
 import io.undertow.server.RoutingHandler;
+import io.undertow.server.handlers.PredicateHandler;
 import io.undertow.server.handlers.accesslog.AccessLogHandler;
 import io.undertow.server.handlers.accesslog.DefaultAccessLogReceiver;
 import io.undertow.server.handlers.proxy.SimpleProxyClientProvider;
@@ -25,7 +26,9 @@ import net.minidev.json.JSONObject;
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.file.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
@@ -38,7 +41,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import static io.undertow.Handlers.routing;
-import static java.util.stream.Collectors.*;
+import static java.util.stream.Collectors.joining;
+import static java.util.stream.Collectors.toList;
 
 public class MHAClinicalAPI {
     public static String readQueryFromFile(String file_name) {
@@ -330,11 +334,95 @@ public class MHAClinicalAPI {
                 });
     }
 
+    public static void chf_triplestore(SPARQLClient sc,
+                                       final String drugsQuery,
+                                       final String problemsQuery,
+                                       final HttpServerExchange exchange) {
+
+
+        Map<String, Deque<String>> params = exchange.getQueryParameters();
+        final String user = params.containsKey("username") ? params.get("username").getFirst() : "";
+
+        final LocalDate to = LocalDate.now(), from = to.minusMonths(18);
+
+        // Get all the ICD-10 coded "problems":
+        CompletableFuture<Set<String>> problems =
+                sc.send_query_and_parse(problemsQuery.replace("{USER}", user))
+                        .thenApplyAsync(records -> records.stream()
+                                .filter(map -> (!"".equals(map.get("code_icd_10"))))
+                                .map(map -> map.get("code_icd_10").toUpperCase())
+                                .collect(Collectors.toSet()));
+        // Get all the ATC codes for drugs
+        CompletableFuture<Set<String>> drugs =
+                sc.send_query_and_parse(drugsQuery.replace("{USER}", user))
+                        .thenApplyAsync(records -> records.stream()
+                                /*
+                                .filter(row -> {
+                                    LocalDate end = "".equals(row.get("end_date")) ? LocalDate.MAX : LocalDate.parse(row.get("end_date").substring(0, 10), DateTimeFormatter.ISO_LOCAL_DATE);
+                                    return !end.isBefore(from);
+                                })
+                                */
+                                .map(map -> map.get("atc_code").toUpperCase())
+                                .collect(Collectors.toSet()));
+
+        CompletableFuture.allOf(drugs, problems)
+                .whenComplete((v, ex) -> {
+                    if (ex != null) {
+                        ex.printStackTrace();
+                        if (exchange.getStatusCode() == StatusCodes.OK)
+                            exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
+                        exchange.getResponseSender().send(ex.getMessage());
+                        exchange.endExchange();
+                        return;
+                    }
+                    final Set<String> drgs = drugs.join();
+                    final Set<String> probs = problems.join();
+
+                    // Keep only the first 3 chars of the ICD10 code
+                    final Set<String> probs_prefixes = probs.stream()
+                            .map(p -> p.substring(0,3))
+                            .collect(Collectors.toSet());
+
+                    // See: https://en.wikipedia.org/wiki/Chronic_obstructive_pulmonary_disease
+                    final boolean hasCOPD = Arrays.asList("J40", "J41", "J42", "J43", "J44", "J47")
+                            .stream()
+                            .anyMatch(probs_prefixes::contains);
+
+                    // See https://en.wikipedia.org/wiki/Heart_failure
+                    final boolean hadHF = probs_prefixes.contains("I50");
+
+                    // See: https://en.wikipedia.org/wiki/Valvular_heart_disease
+                    final boolean hasValveDisease = Arrays.asList("I05", "I06", "I07", "I08", "I34", "I35", "I36", "I37", "Q22", "Q23")
+                            .stream()
+                            .anyMatch(probs_prefixes::contains);
+
+                    //See https://en.wikipedia.org/wiki/Beta_blocker
+                    final boolean receivesBetaBlockers = drgs.stream().anyMatch(d -> d.startsWith("C07"));
+
+                    //See https://en.wikipedia.org/wiki/ACE_inhibitor
+                    final boolean receivesACEI = drgs.stream().anyMatch(d -> d.startsWith("C09"));
+
+
+                    JSONObject resObj = new JSONObject();
+                    resObj.put("drugs", drgs);
+                    resObj.put("problems", probs);
+                    resObj.put("valve_disease", hasValveDisease);
+                    resObj.put("hf", hadHF);
+                    resObj.put("copd", hasCOPD);
+                    resObj.put("beta_blockers", receivesBetaBlockers);
+                    resObj.put("acei", receivesACEI);
+                    resObj.put("user", user);
+                    exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "application/json");
+                    final String jsonString = resObj.toJSONString();
+                    exchange.getResponseSender().send(jsonString);
+                });
+    }
     public static void ask_triplestore(SPARQLClient sc, DICOMClient dc, final String user,
                                        final String imagesQuery,
                                        final String drugsQuery,
                                        final String vitalSignsQuery,
                                        final String problemsQuery,
+                                       final String alertsQuery,
                                        final String baseURI, HttpServerExchange exchange) {
 
         Map<String, Deque<String>> params = exchange.getQueryParameters();
@@ -461,7 +549,22 @@ public class MHAClinicalAPI {
                             list.addAll(results);
                             return list;
                         });
-        CompletableFuture.allOf(medical_images, drugs, signs, problems)
+        CompletableFuture<JSONArray> alerts =
+                sc.send_query_and_parse(alertsQuery.replace("{USER}", user))
+                        .thenApplyAsync(records -> {
+                            List<JSONObject> results = records.stream()
+                                    .map(map -> {
+                                        JSONObject obj = new JSONObject();
+                                        obj.put("title", map.get("title"));
+                                        obj.put("when", "".equals(map.get("date")) ? null : map.get("date").substring(0, 10));
+                                        return obj;
+                                    }).collect(Collectors.toList());
+
+                            JSONArray list = new JSONArray();
+                            list.addAll(results);
+                            return list;
+                        });
+        CompletableFuture.allOf(medical_images, drugs, signs, problems, alerts)
                 .whenComplete((v, ex) -> {
                     if (ex != null) {
                         ex.printStackTrace();
@@ -475,6 +578,7 @@ public class MHAClinicalAPI {
                     JSONArray drgs = drugs.join();
                     JSONArray vital_signs = signs.join();
                     JSONArray images = medical_images.join();
+                    JSONArray alrts = alerts.join();
                     JSONObject summary = new JSONObject();
 //                    summary.put("id", pat_sum_uuid.join().toString());
 
@@ -484,6 +588,7 @@ public class MHAClinicalAPI {
                     JSONObject resObj = new JSONObject();
                     resObj.put("summary", summary);
                     resObj.put("medical_images", images);
+                    resObj.put("alerts", alrts);
                     exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "application/json");
                     final String jsonString = resObj.toJSONString();
                     exchange.getResponseSender().send(jsonString);
@@ -592,7 +697,7 @@ public class MHAClinicalAPI {
         }
 
 
-        CassandraClient.DB.connect(config.getCassandraKeyspace(), config.getCassandraUser(), config.getCassandraPwd(), config.getCassandraHost());
+        // CassandraClient.DB.connect(config.getCassandraKeyspace(), config.getCassandraUser(), config.getCassandraPwd(), config.getCassandraHost());
         final String imagesQuery = readQueryFromFile("DICOM_Series.sparql");
         final String drugsQuery = readQueryFromFile("Drugs.sparql");
         final String vitalSignsQuery = readQueryFromFile("Vital_signs.sparql");
@@ -619,7 +724,7 @@ public class MHAClinicalAPI {
                     final String user = queryParameters.containsKey("u") ? queryParameters.get("u").getFirst()
                             : exchange.getAttachment(AccessTokenValidator.MHA_ACCOUNT).getPrincipal().getName();
                     quickly_dispatch(exchange, () -> ask_triplestore(sparqlClient, dicomClient, user,
-                            imagesQuery, drugsQuery, vitalSignsQuery, problemsQuery,
+                            imagesQuery, drugsQuery, vitalSignsQuery, problemsQuery, alertsQuery,
                             baseURI, exchange));
                 })
 
@@ -719,8 +824,16 @@ public class MHAClinicalAPI {
                 })
                 .post("/upload", new UploadHandler(tempUploadDir, tempStoreDir));
 
+        final HttpHandler chfHandler = exchange -> quickly_dispatch(exchange,
+                () -> chf_triplestore(sparqlClient, drugsQuery, problemsQuery, exchange));
 
-        HttpHandler rootHandler = tokenValidator.wrap(routes);
+        final HttpHandler authenticatingHandler = tokenValidator.wrap(routes);
+
+        HttpHandler rootHandler = new PredicateHandler(
+                //XXX: The handler for the COPD is not secure, it is called via the portal API
+                httpServerExchange -> httpServerExchange.getRequestPath().equals("/chf"), chfHandler,
+                authenticatingHandler);
+
         if (config.getLogDirPath() != null) {
             final AccessLogHandler logHandler = new AccessLogHandler(rootHandler,
                     new DefaultAccessLogReceiver(Executors.newSingleThreadExecutor(),
