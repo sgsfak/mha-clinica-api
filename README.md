@@ -20,7 +20,7 @@ The following drawing shows the architecture:
                  +----------------------+                                   ^
    HTTP REST     |                      |                                   |
                  |                      |                                   |
-+--------------> |                      |                                   |
++--------------->|                      |                                   |
                  |   MHA Clinical API   |                                   |
                  |                      +-----------------------------------+
                  |                      |         C-STORE, C-FIND, C-GET, WADO
@@ -30,13 +30,13 @@ The following drawing shows the architecture:
                              |      |                                                   +---------------------+
                              |      |                                                   |                     |
                              |      |              SPARQL                               |                     |
-                             |      +-------------------------------------------------> |      TripleStore    |
+                             |      +-------------------------------------------------->|      TripleStore    |
                   Store      |                                                          |      (Virtuoso)     |
                   clinical   |                                                          |                     |
                   data       |        +--------------------------+                      |                     |
                              |        |                          |                      +---------------------+
                              |        |         CASSANDRA        |
-                             +-------->     (the "data lake")    |
+                             +------->|     (the "data lake")    |
                                       |                          |
                                       +--------------------------+
 
