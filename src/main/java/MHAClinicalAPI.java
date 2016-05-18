@@ -731,18 +731,14 @@ public class MHAClinicalAPI {
 
         final RoutingHandler routes = routing()
                 .get("/patsum", exchange -> {
-                    final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
-                    final String user = queryParameters.containsKey("u") ? queryParameters.get("u").getFirst()
-                            : exchange.getAttachment(AccessTokenValidator.MHA_ACCOUNT).getPrincipal().getName();
+                    final String user = exchange.getAttachment(AccessTokenValidator.MHA_ACCOUNT).getPrincipal().getName();
                     quickly_dispatch(exchange, () -> ask_triplestore(sparqlClient, dicomClient, user,
                             imagesQuery, drugsQuery, vitalSignsQuery, problemsQuery, alertsQuery,
                             baseURI, exchange));
                 })
 
                 .get("/alerts", exchange -> {
-                    final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
-                    final String user = queryParameters.containsKey("u") ? queryParameters.get("u").getFirst()
-                            : exchange.getAttachment(AccessTokenValidator.MHA_ACCOUNT).getPrincipal().getName();
+                    final String user = exchange.getAttachment(AccessTokenValidator.MHA_ACCOUNT).getPrincipal().getName();
                     quickly_dispatch(exchange, () -> alerts_from_triplestore(sparqlClient, user,
                             alertsQuery, exchange));
                 })
