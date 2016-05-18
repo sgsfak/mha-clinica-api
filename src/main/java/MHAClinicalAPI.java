@@ -428,6 +428,53 @@ public class MHAClinicalAPI {
                     exchange.getResponseSender().send(jsonString);
                 });
     }
+
+    public static CompletableFuture<Set<String>> dcmInstanceUidsOfUser(SPARQLClient sc, final String user,
+                                                                  final String imagesQuery) {
+
+        final LocalDate from = LocalDate.parse("1800-01-01", DateTimeFormatter.ISO_LOCAL_DATE);
+        final LocalDate to = LocalDate.parse("9999-12-30", DateTimeFormatter.ISO_LOCAL_DATE);
+        String q = imagesQuery.replace("{USER}", user)
+                .replace("{START_DATE}", from.toString())
+                .replace("{END_DATE}", to.toString());
+
+        // System.out.println(q);
+        return sc.send_query_and_parse(q)
+                .thenApplyAsync(records -> {
+                    Pattern pattern = Pattern.compile("'[\\d.]+'"); // Match an instance UID in single quotes
+                    return records.stream()
+                            .flatMap(map -> {
+                                final String series_uid = map.get("series_uid");
+                                final Matcher matcher = pattern.matcher(map.get("instance_uids"));
+                                List<String> inst_uids = new ArrayList<>();
+                                // Find all matches
+                                while (matcher.find()) {
+                                    // Get the matching string
+                                    String match = matcher.group();
+                                    inst_uids.add(match.substring(1, match.length() - 1));
+                                }
+                                return inst_uids.stream();
+                            })
+                            .collect(Collectors.toSet());
+                });
+    }
+
+    public static CompletableFuture<Set<String>> dcmSeriesUidsOfUser(SPARQLClient sc, final String user,
+                                                                     final String imagesQuery) {
+
+        final LocalDate from = LocalDate.parse("1800-01-01", DateTimeFormatter.ISO_LOCAL_DATE);
+        final LocalDate to = LocalDate.parse("9999-12-30", DateTimeFormatter.ISO_LOCAL_DATE);
+        String q = imagesQuery.replace("{USER}", user)
+                .replace("{START_DATE}", from.toString())
+                .replace("{END_DATE}", to.toString());
+
+        // System.out.println(q);
+        return sc.send_query_and_parse(q)
+                .thenApplyAsync(records -> records.stream()
+                        .map(map -> map.get("series_uid"))
+                        .collect(Collectors.toSet()));
+    }
+
     public static void ask_triplestore(SPARQLClient sc, DICOMClient dc, final String user,
                                        final String imagesQuery,
                                        final String drugsQuery,
@@ -751,7 +798,28 @@ public class MHAClinicalAPI {
                         return;
                     }
                     final String seriesUid = queryParameters.get("series_uid").getFirst();
-                    quickly_dispatch(exchange, () -> get_dcm_series(dicomClient, seriesUid, exchange));
+                    final String user = exchange.getAttachment(AccessTokenValidator.MHA_ACCOUNT).getPrincipal().getName();
+                    exchange.dispatch( () -> {
+                        dcmSeriesUidsOfUser(sparqlClient, user, imagesQuery)
+                                .thenAccept(seriesUids -> {
+                                    if (seriesUids.contains(seriesUid))
+                                        get_dcm_series(dicomClient, seriesUid, exchange);
+                                    else {
+                                        exchange.setStatusCode(StatusCodes.UNAUTHORIZED);
+                                        exchange.getResponseHeaders().put(new HttpString(HttpHeaders.CONTENT_TYPE), "text/plain");
+                                        exchange.getResponseSender().send("You are not authorized to get this series...");
+                                        exchange.endExchange();
+                                    }
+                                })
+                                .exceptionally(ex -> {
+                                    exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
+                                    exchange.getResponseHeaders().put(new HttpString(HttpHeaders.CONTENT_TYPE), "text/plain");
+                                    exchange.getResponseSender().send(ex.getMessage());
+                                    exchange.endExchange();
+                                    return null;
+                                });
+
+                    });
                 })
 
                 .get("/wado",
@@ -762,10 +830,43 @@ public class MHAClinicalAPI {
                                 exchange.getResponseSender().send("You must specify the 'instance_uid' query parameter");
                                 return;
                             }
-                            exchange.setQueryString(DICOMClient.build_wado_request_query(queryParameters.get("instance_uid").getFirst()));
-                            exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "image/jpeg");
-                            exchange.getResponseHeaders().put(Headers.CACHE_CONTROL, "max-age=86400");
-                            wadoProxyHandler.handleRequest(exchange);
+
+                            final String user = exchange.getAttachment(AccessTokenValidator.MHA_ACCOUNT).getPrincipal().getName();
+
+                            final String instance_uid = queryParameters.get("instance_uid").getFirst();
+                            exchange.dispatch( () -> {
+                                        dcmInstanceUidsOfUser(sparqlClient, user, imagesQuery)
+                                                .thenAccept(instances -> {
+                                                    if (instances.contains(instance_uid)) {
+
+                                                        exchange.setQueryString(DICOMClient.build_wado_request_query(instance_uid));
+                                                        exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "image/jpeg");
+                                                        exchange.getResponseHeaders().put(Headers.CACHE_CONTROL, "max-age=86400");
+                                                        try {
+                                                            wadoProxyHandler.handleRequest(exchange);
+                                                        } catch (Exception e) {
+                                                            e.printStackTrace();
+                                                            exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
+                                                            exchange.getResponseHeaders().put(new HttpString(HttpHeaders.CONTENT_TYPE), "text/plain");
+                                                            exchange.getResponseSender().send(e.getMessage());
+                                                            exchange.endExchange();
+                                                        }
+                                                    }
+                                                    else {
+                                                        exchange.setStatusCode(StatusCodes.UNAUTHORIZED);
+                                                        exchange.getResponseHeaders().put(new HttpString(HttpHeaders.CONTENT_TYPE), "text/plain");
+                                                        exchange.getResponseSender().send("You are not authorized to get this series...");
+                                                        exchange.endExchange();
+                                                    }
+                                                })
+                                                .exceptionally(ex -> {
+                                                    exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
+                                                    exchange.getResponseHeaders().put(new HttpString(HttpHeaders.CONTENT_TYPE), "text/plain");
+                                                    exchange.getResponseSender().send(ex.getMessage());
+                                                    exchange.endExchange();
+                                                    return null;
+                                                });
+                                    });
                         })
                 .get("/series", exchange -> {
                     final Map<String, Deque<String>> queryParameters = exchange.getQueryParameters();
@@ -780,6 +881,65 @@ public class MHAClinicalAPI {
                         exchange.getResponseSender().send("You must specify a non-empty value for the 'id' query parameter");
                         return;
                     }
+                    final String user = exchange.getAttachment(AccessTokenValidator.MHA_ACCOUNT).getPrincipal().getName();
+                    exchange.dispatch( () -> {
+                        dcmSeriesUidsOfUser(sparqlClient, user, imagesQuery)
+                                .thenAccept(seriesUids -> {
+                                    if (!seriesUids.contains(seriesUid)) {
+                                        exchange.setStatusCode(StatusCodes.UNAUTHORIZED);
+                                        exchange.getResponseHeaders().put(new HttpString(HttpHeaders.CONTENT_TYPE), "text/plain");
+                                        exchange.getResponseSender().send("You are not authorized to get this series...");
+                                        exchange.endExchange();
+                                        return;
+                                    }
+                                    dicomClient.find_series_async(seriesUid)
+                                            .thenAccept(series -> {
+                                                System.out.println(String.format("<%s> Series %s, pat_id=%s, study=%s, modality=%s\n",
+                                                        Thread.currentThread().getName(),
+                                                        series.seriesUID, series.patientId, series.studyUID, series.modality));
+                                                if (series.isNull()) {
+                                                    exchange.setStatusCode(StatusCodes.NOT_FOUND);
+                                                    exchange.getResponseSender().send(String.format("Series <%s> does not contain any instances!\n", seriesUid));
+                                                    exchange.endExchange();
+                                                    return;
+                                                }
+                                                JSONObject js = new JSONObject();
+                                                js.put("series_uid", series.seriesUID);
+                                                js.put("patient_uid", series.patientId);
+                                                js.put("study_uid", series.studyUID);
+                                                js.put("series_date", series.seriesDate);
+                                                js.put("instance_uids", series.instanceUID.stream()
+                                                        .map(instance_uid -> JSONNavi.newInstanceObject()
+                                                                .set("instance_uid", instance_uid)
+                                                                .set("href", baseURI + "/wado?instance_uid=" + instance_uid)
+                                                                .getRoot())
+                                                        .collect(toList()));
+
+                                                exchange.setStatusCode(StatusCodes.OK);
+                                                exchange.getResponseHeaders().put(new HttpString(HttpHeaders.CONTENT_TYPE), "application/json");
+                                                exchange.getResponseSender().send(js.toJSONString());
+                                                exchange.endExchange();
+                                            })
+
+                                            .exceptionally(ex -> {
+                                                exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
+                                                exchange.getResponseHeaders().put(new HttpString(HttpHeaders.CONTENT_TYPE), "text/plain");
+                                                exchange.getResponseSender().send(ex.getMessage());
+                                                exchange.endExchange();
+                                                return null;
+                                            });
+
+                                })
+                                .exceptionally(ex -> {
+                                    exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
+                                    exchange.getResponseHeaders().put(new HttpString(HttpHeaders.CONTENT_TYPE), "text/plain");
+                                    exchange.getResponseSender().send(ex.getMessage());
+                                    exchange.endExchange();
+                                    return null;
+                                });
+
+                    });
+                    /*
                     quickly_dispatch(exchange, () -> {
                         dicomClient.find_series_async(seriesUid)
                                 .thenAccept(series -> {
@@ -792,7 +952,6 @@ public class MHAClinicalAPI {
                                         exchange.endExchange();
                                         return;
                                     }
-
                                     JSONObject js = new JSONObject();
                                     js.put("series_uid", series.seriesUID);
                                     js.put("patient_uid", series.patientId);
@@ -818,7 +977,7 @@ public class MHAClinicalAPI {
                                     return null;
                                 });
                     });
-
+*/
 
                 })
 
